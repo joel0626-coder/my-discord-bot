@@ -24,7 +24,9 @@ FINMIND_TOKEN = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJ1c2VyX2lkIjoiam9lbDA2Mj
 STRAT_MAP = {
     "1": "1. 布林壓縮突破 (動能)",
     "2": "2. 雙均線+MACD (趨勢)",
-    "3": "3. RSI超賣反彈 (逆勢)"
+    "3": "3. RSI超賣反彈 (逆勢)",
+    "4": "4. 多頭縮量回踩 (高勝率防守)",
+    "5": "5. 強勢創高確認 (高勝率攻擊)"
 }
 
 def load_data():
@@ -67,36 +69,34 @@ def get_all_taiwan_tickers():
     return _TICKER_CACHE
 
 # =====================================================================
-# 🛡️ 核心：指標計算與個股評估
+# 🛡️ 核心：指標計算與個股評估 (新增高勝率指標)
 # =====================================================================
 def calculate_indicators(df):
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
     
-    # 均線系統
     df['SMA_5'] = df['Close'].rolling(window=5).mean()
     df['SMA_10'] = df['Close'].rolling(window=10).mean()
     df['SMA_20'] = df['Close'].rolling(window=20).mean()
     df['SMA_60'] = df['Close'].rolling(window=60).mean()
     
-    # 量能系統
     df['Vol_5MA'] = df['Volume'].rolling(window=5).mean()
     df['Vol_20MA'] = df['Volume'].rolling(window=20).mean()
     
-    # 布林通道與帶寬
+    # 策略 5 需要的「20日最高價」
+    df['Max_20'] = df['Close'].rolling(window=20).max()
+    
     std = df['Close'].rolling(window=20).std()
     df['BB_Upper'] = df['SMA_20'] + (2 * std)
     df['BB_Lower'] = df['SMA_20'] - (2 * std)
     df['BB_Width'] = (df['BB_Upper'] - df['BB_Lower']) / df['SMA_20']
     
-    # MACD 系統
     ema12 = df['Close'].ewm(span=12, adjust=False).mean()
     ema26 = df['Close'].ewm(span=26, adjust=False).mean()
     df['MACD'] = ema12 - ema26
     df['Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
     df['MACD_Hist'] = df['MACD'] - df['Signal']
     
-    # RSI 系統
     delta = df['Close'].diff()
     gain = delta.where(delta > 0, 0)
     loss = -delta.where(delta < 0, 0)
@@ -107,7 +107,6 @@ def calculate_indicators(df):
     return df
 
 def run_evaluation(code):
-    """個股策略打擊區評估功能"""
     tickers_dict = get_all_taiwan_tickers() 
     exact_ticker = f"{code}.TW"
     stock_name = "未知名稱"
@@ -120,7 +119,6 @@ def run_evaluation(code):
         stock_name = tickers_dict[exact_ticker]['name']
         
     try:
-        # 下載 4 個月資料以確保季線(60MA)精準
         df = yf.download(exact_ticker, period="4mo", progress=False)
         if df.empty or len(df) < 65:
             return f"⚠️ 找不到代號 {code} 的報價，或上市時間太短不足以計算季線與技術指標。"
@@ -130,6 +128,7 @@ def run_evaluation(code):
         prev1 = df.iloc[-2]
         
         close = round(latest['Close'].item(), 2)
+        low = round(latest['Low'].item(), 2)
         vol = latest['Volume'].item()
         open_px = latest['Open'].item()
         
@@ -137,65 +136,74 @@ def run_evaluation(code):
         ma20 = round(latest['SMA_20'].item(), 2)
         ma60 = round(latest['SMA_60'].item(), 2)
         
+        vol_5ma = latest['Vol_5MA'].item()
+        vol_20ma = latest['Vol_20MA'].item()
+        
         bb_upper = round(latest['BB_Upper'].item(), 2)
         bb_width = prev1['BB_Width'].item()
         
         macd, sig = latest['MACD'].item(), latest['Signal'].item()
         prev_macd, prev_sig = prev1['MACD'].item(), prev1['Signal'].item()
-        
         rsi = latest['RSI'].item()
         prev_rsi = prev1['RSI'].item()
+        max20_prev = prev1['Max_20'].item()
         
         is_uptrend = latest['SMA_60'].item() > prev1['SMA_60'].item()
         
-        # ==== 策略條件審查 (採用嚴格模式標準) ====
-        # 1. 布林突破
+        # ==== 策略條件審查 ====
+        # 1. 布林突破 (動能攻擊)
         bb_cond1 = bb_width < 0.08
         bb_cond2 = close > latest['BB_Upper'].item()
-        bb_cond3 = vol > (latest['Vol_20MA'].item() * 2)
+        bb_cond3 = vol > (vol_20ma * 2)
         bb_pass = bb_cond1 and bb_cond2 and bb_cond3 and is_uptrend and (close > open_px)
         
-        # 2. MACD 金叉
+        # 2. MACD 金叉 (波段趨勢)
         macd_pass = is_uptrend and (close > ma60) and (prev_macd < prev_sig) and (macd > sig)
         
-        # 3. RSI 反彈
+        # 3. RSI 反彈 (左側逆勢)
         rsi_pass = (close < ma20 * 0.95) and (prev_rsi < 30) and (rsi >= 30)
+        
+        # 4. 多頭縮量回踩 (高勝率防守)
+        # 季線上揚且大於季線 + 最低價極度靠近或跌破月線(洗盤) + 收盤站回月線 + 成交量低於5日均量(散戶殺跌主力沒跑)
+        pullback_pass = is_uptrend and (close > ma60) and (low <= ma20 * 1.015) and (close > ma20) and (vol < vol_5ma)
+        
+        # 5. 強勢創高確認 (高勝率攻擊)
+        # 均線多頭(月大於季) + 收盤價突破過去一個月最高點 + 帶量攻擊
+        breakout_pass = is_uptrend and (ma20 > ma60) and (close > max20_prev) and (vol > vol_5ma * 1.5)
 
         # ==== 產生評估報告 ====
         msg = f"🔬 **【個股 X 光機評估報告】**\n"
         msg += f"📌 **{code} {stock_name}** | 最新收盤價: `{close}`\n"
-        msg += f"📊 趨勢基準: 月線 `{ma20}` | 季線 `{ma60}`\n"
+        msg += f"📊 基準: 月線 `{ma20}` | 季線 `{ma60}`\n"
         msg += "=========================\n"
         
-        # 布林狀態
-        if bb_pass: msg += f"💥 **策略 1 (布林動能)**: ✅ **強勢符合！** (帶量突破壓縮上軌)\n"
-        else:
-            reason = "尚未帶量突破" if not bb_cond2 else "布林開口未極度壓縮" if not bb_cond1 else "季線非多頭排列"
-            msg += f"💥 **策略 1 (布林動能)**: ❌ 未達標 (原因: {reason})\n"
+        if bb_pass: msg += f"💥 **策略 1 (布林動能)**: ✅ 帶量突破上軌\n"
+        if macd_pass: msg += f"🏄‍♂️ **策略 2 (MACD趨勢)**: ✅ 季線上黃金交叉\n"
+        if rsi_pass: msg += f"🎣 **策略 3 (RSI逆勢)**: ✅ 跌破超賣區後翻揚\n"
+        
+        if pullback_pass: msg += f"🛡️ **策略 4 (縮量回踩)**: ✅ **[高勝率]** 縮量量縮回測月線有守\n"
+        else: msg += f"🛡️ **策略 4 (縮量回踩)**: ❌ 未達標 (需縮量且回測月線有守)\n"
             
-        # MACD 狀態
-        if macd_pass: msg += f"🏄‍♂️ **策略 2 (MACD趨勢)**: ✅ **波段發動！** (季線上 MACD 黃金交叉)\n"
-        else:
-            reason = "MACD 尚未金叉" if macd <= sig else "跌破季線生命線"
-            msg += f"🏄‍♂️ **策略 2 (MACD趨勢)**: ❌ 未達標 (原因: {reason})\n"
+        if breakout_pass: msg += f"🚀 **策略 5 (強勢創高)**: ✅ **[高勝率]** 帶量突破近一月新高\n"
+        else: msg += f"🚀 **策略 5 (強勢創高)**: ❌ 未達標 (未過前高或量能不足)\n"
             
-        # RSI 狀態
-        if rsi_pass: msg += f"🎣 **策略 3 (RSI逆勢)**: ✅ **危機入市！** (RSI 跌破超賣區後翻揚)\n"
-        else:
-            reason = "RSI 尚未落入極度超賣區或未翻揚" if rsi >= 30 or prev_rsi >= 30 else "未乖離月線"
-            msg += f"🎣 **策略 3 (RSI逆勢)**: ❌ 未達標 (原因: {reason})\n"
+        if not (bb_pass or macd_pass or rsi_pass or pullback_pass or breakout_pass):
+            msg += f"*(動能與反彈策略亦無觸發)*\n"
             
         msg += "=========================\n"
         
         # 教練結論
-        if bb_pass or macd_pass or rsi_pass:
+        if bb_pass or macd_pass or rsi_pass or pullback_pass or breakout_pass:
             matched_strats = []
             if bb_pass: matched_strats.append("策略1")
             if macd_pass: matched_strats.append("策略2")
             if rsi_pass: matched_strats.append("策略3")
-            msg += f"💡 **【AI 教練結論】: 建議買進！**\n🔥 該股目前符合 **{', '.join(matched_strats)}** 的進場訊號。若決定試單，請用 `!新增 {code} {close} {matched_strats[0][-1]}` 加入小秘書監控，並嚴設停損！"
+            if pullback_pass: matched_strats.append("策略4")
+            if breakout_pass: matched_strats.append("策略5")
+            
+            msg += f"💡 **【AI 教練結論】: 建議買進！**\n🔥 該股目前符合 **{', '.join(matched_strats)}** 的發動訊號。若決定進場，請用 `!新增 {code} {close} {matched_strats[0][-1]}` 加入小秘書監控，嚴設風控！"
         else:
-            msg += f"💡 **【AI 教練結論】: 建議觀望 👀**\n這檔股票目前技術面**並未觸發**我們的量化攻擊條件。建議先加入自選股觀察，不要急著把資金卡在不會動或趨勢轉弱的股票上！"
+            msg += f"💡 **【AI 教練結論】: 建議觀望 👀**\n這檔股票目前技術面**並未觸發**任何高勝率或動能攻擊條件。不要急著把資金卡在沒有表態的股票上，請多看少做！"
             
         return msg
     except Exception as e:
@@ -215,7 +223,6 @@ def run_health_check():
         
         try:
             df = yf.download(exact_ticker, period="3mo", progress=False)
-            
             stock_name = info.get('name', '')
             display_title = f"{code} {stock_name}".strip()
             
@@ -249,6 +256,7 @@ def run_health_check():
             elif sl_pct and profit <= -float(sl_pct): alert_msg = f"🛑 [落跑停損] 報酬率 {profit}% 已達停損點 (-{sl_pct}%)！"
                 
             if not alert_msg:
+                # 若為策略4、5，防守邏輯通常看月線或10日線，這裡通用化短中線防護
                 if "1" in strat or "布林" in strat:
                     custom_panel = f"上軌 `{round(bb_upper, 2)}` | 5日線 `{round(ma5, 2)}` | 10日線 `{round(ma10, 2)}`"
                     if close < ma10: alert_msg = "🚨 [快出場] 跌破 10 日線，動能消散！" if is_high_vol else "⚠️ [注意] 破 10 日線。"
@@ -264,6 +272,10 @@ def run_health_check():
                     if rsi_val < prev_rsi and prev_rsi > 70: alert_msg = "🚨 [快跑] RSI 自高檔反轉向下！"
                     elif rsi_val > 75: alert_msg = "🔴 [極度超買] RSI 突破 75。"
                     elif rsi_val < 25: alert_msg = "🟢 [極度超賣] RSI 跌破 25，留意反彈。"
+                elif "4" in strat or "回踩" in strat or "5" in strat or "創高" in strat:
+                    # 高勝率策略通用防守：跌破月線為最終底線
+                    custom_panel = f"10日線 `{round(ma10, 2)}` | 月線 `{round(ma20, 2)}`"
+                    if close < ma10: alert_msg = "⚠️ [警訊] 跌破 10 日線，趨勢轉弱。"
                 else:
                     custom_panel = f"10日線 `{round(ma10, 2)}` | 月線 `{round(ma20, 2)}`"
                     
@@ -285,7 +297,6 @@ def run_health_check():
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix='!', intents=intents)
-
 bot.remove_command('help')
 
 @tasks.loop(minutes=30)
@@ -304,40 +315,33 @@ async def auto_report():
 async def on_ready():
     print(f"✅ 雲端小秘書登入成功: {bot.user}")
     if not auto_report.is_running(): auto_report.start()
-    print("🚀 盤中持股監控排程已啟動！")
 
 # =====================================================================
 # 💬 使用者手動控制指令區
 # =====================================================================
 @bot.command(aliases=['help', '幫助'])
 async def 指令(ctx):
-    """視覺化指令導覽選單"""
     embed = discord.Embed(
         title="🤖 雲端小秘書 - 指令大全",
         description="老闆，以下是您可以對我下達的指令清單，格式內的 `[ ]` 代表需要填寫的參數（請空一格）：",
         color=0x2ECC71
     )
-    
     embed.add_field(name="🔍 `!健檢`", value="極速掃描目前所有持股的技術面與風控狀態。", inline=False)
     embed.add_field(name="🔬 `!評估 [代號]`", value="個股 X 光機！幫你鑑定這檔股票是否符合買進策略。\n*範例: `!評估 2330`*", inline=False)
-    embed.add_field(name="📥 `!新增 [代號] [成本] [策略] [名稱] [停利%] [停損%]`", value="加入新持股。\n*範例: `!新增 2330 800 1 台積電 15 5`*\n(名稱與風控％數若不設定可直接留空)", inline=False)
+    embed.add_field(name="📥 `!新增 [代號] [成本] [策略] [名稱] [停利%] [停損%]`", value="加入新持股。\n*範例: `!新增 2330 800 1 台積電 15 5`*", inline=False)
     embed.add_field(name="🛡️ `!風控 [代號] [停利%] [停損%]`", value="更新指定股票的停損停利點。\n*範例: `!風控 2330 20 10`*", inline=False)
-    embed.add_field(name="⚙️ `!策略 [代號] [策略代號]`", value="修改持股的技術面防護策略。\n*範例: `!策略 2330 2`*", inline=False)
+    embed.add_field(name="⚙️ `!策略 [代號] [策略代號]`", value="修改持股的技術面防護策略。\n*範例: `!策略 2330 4`*", inline=False)
     embed.add_field(name="🏷️ `!命名 [代號] [名稱]`", value="幫股票加上中文名稱。\n*範例: `!命名 2330 護國神山`*", inline=False)
     embed.add_field(name="🗑️ `!刪除 [代號]`", value="將股票從監控清單中移除。\n*範例: `!刪除 2330`*", inline=False)
     
-    embed.add_field(name="💡 【策略代號對照表】", value="`1` : 布林壓縮突破 (動能：防守 5/10 日線)\n`2` : 雙均線+MACD (趨勢：防守 MACD 綠柱與死叉)\n`3` : RSI超賣反彈 (逆勢：防守高檔轉折)", inline=False)
-    
+    embed.add_field(name="💡 【策略代號對照表】", value="`1`: 布林突破 (動能攻擊)\n`2`: MACD金叉 (趨勢發動)\n`3`: RSI反彈 (左側逆勢)\n`4`: 縮量回踩 (高勝率防守)\n`5`: 創高確認 (高勝率攻擊)", inline=False)
     embed.set_footer(text="🌟 提示：平日開盤期間 (09:30~14:00)，小秘書會每半小時自動推播一次戰報！")
-    
     await ctx.send(embed=embed)
 
 @bot.command()
 async def 評估(ctx, code: str):
-    """個股進場條件評估"""
     msg = await ctx.send(f"⏳ 正在調閱 `{code}` 的技術線圖，啟動量化打擊區分析...")
     try:
-        # 單檔股票運算極快，30秒絕對足夠
         result = await asyncio.wait_for(asyncio.to_thread(run_evaluation, code), timeout=30.0)
         await msg.edit(content=result)
     except asyncio.TimeoutError:
@@ -347,7 +351,6 @@ async def 評估(ctx, code: str):
 
 @bot.command()
 async def 健檢(ctx):
-    """手動檢查目前庫存狀況"""
     msg = await ctx.send("⏳ 正在極速分析庫存短線敏銳技術指標...")
     try:
         result = await asyncio.wait_for(asyncio.to_thread(run_health_check), timeout=120.0)
@@ -407,9 +410,6 @@ async def 策略(ctx, code: str, strat_num: str):
         await ctx.send(f"✅ **{code} {name}** 策略已更新為: `{full_strat}`")
     else: await ctx.send(f"⚠️ 找不到代號 {code}。")
 
-# =====================================================================
-# 🌐 Render 專用不休眠 Web 伺服器
-# =====================================================================
 async def start_web_server():
     app = web.Application()
     app.router.add_get('/', lambda r: web.Response(text="Cloud Secretary Guardian is running!"))
