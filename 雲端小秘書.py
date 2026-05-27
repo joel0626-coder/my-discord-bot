@@ -28,10 +28,18 @@ bot = commands.Bot(command_prefix='!', intents=intents)
 
 @bot.command()
 async def 健檢(ctx):
-    await ctx.send("⏳ 正在連線 Yahoo 財經抓取最新報價...")
-    # (此處省略計算函數，請保留你之前的計算邏輯)
-    # 確保這支程式在雲端能穩定運作
-    await ctx.send("✅ 系統運作正常，防守線計算完成。")
+    # 增加一個「正在處理中」的反應圖示，讓你知道它在忙
+    await ctx.message.add_reaction("⏳")
+    
+    # 執行健檢
+    result_msg = await asyncio.to_thread(run_health_check)
+    
+    # 回覆結果
+    await ctx.send(result_msg)
+    
+    # 執行完後，把那個⏳反應移除，這就是「結束」的信號
+    await ctx.message.remove_reaction("⏳", bot.user)
+    await ctx.message.add_reaction("✅")
 
 @bot.command()
 async def 新增(ctx, code: str, price: float, strat_num: str):
