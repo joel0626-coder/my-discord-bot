@@ -358,3 +358,95 @@ async def 指令(ctx):
     )
     embed_strat.add_field(
         name="5️⃣ 強勢創高確認 (高勝率追強)",
+        value="🟢 **為何買：** 股價帶量突破過去一個月最高點。上面完全沒有被套牢的冤魂，沒有解套賣壓，容易一飛衝天。\n🔴 **為何賣：** (嚴格防守) 突破股必須強者恆強！只要跌破「5日線」警報響起，跌破「10日線」判定為假突破誘多，立刻砍倉。",
+        inline=False
+    )
+    
+    await ctx.send(embed=embed_cmd)
+    await ctx.send(embed=embed_strat)
+
+@bot.command()
+async def 評估(ctx, code: str):
+    msg = await ctx.send(f"⏳ 正在調閱 `{code}` 的技術線圖，啟動量化打擊區分析...")
+    try:
+        result = await asyncio.wait_for(asyncio.to_thread(run_evaluation, code), timeout=30.0)
+        await msg.edit(content=result)
+    except asyncio.TimeoutError:
+        await msg.edit(content="⚠️ 運算逾時，Yahoo 財經連線不穩，請稍後再試。")
+    except Exception as e:
+        await msg.edit(content=f"❌ 評估過程發生系統錯誤: `{str(e)}`")
+
+@bot.command()
+async def 健檢(ctx):
+    msg = await ctx.send("⏳ 正在極速分析庫存短線敏銳技術指標...")
+    try:
+        result = await asyncio.wait_for(asyncio.to_thread(run_health_check), timeout=120.0)
+        if len(result) > 1900: result = result[:1900] + "\n\n⚠️ ...(庫存過多，字數達 Discord 上限)"
+        await msg.edit(content=result)
+    except asyncio.TimeoutError:
+        await msg.edit(content="⚠️ 運算逾時，Yahoo 財經連線不穩，請稍後再試。")
+
+@bot.command()
+async def 新增(ctx, code: str, price: float, strat_num: str, name: str = "", tp: float = None, sl: float = None):
+    full_strat = STRAT_MAP.get(strat_num, strat_num) 
+    data = load_data()
+    data[code] = {"buy_price": price, "strategy": full_strat, "name": name, "tp_pct": tp, "sl_pct": sl}
+    save_data(data)
+    display_title = f"{code} {name}".strip()
+    风控文 = f" | 停利: +{tp}% 停損: -{sl}%" if (tp or sl) else " | 未設定風控"
+    await ctx.send(f"✅ 已新增 **{display_title}**\n成本: `{price}`\n策略: `{full_strat}`{风控文}")
+
+@bot.command()
+async def 風控(ctx, code: str, tp: float, sl: float):
+    data = load_data()
+    if code in data:
+        data[code]['tp_pct'] = tp
+        data[code]['sl_pct'] = sl
+        save_data(data)
+        name = data[code].get('name', '')
+        await ctx.send(f"✅ **{code} {name}** 風控設定成功！\n🎯 停利點: `+{tp}%`\n🛑 停損點: `-{sl}%`")
+    else: await ctx.send(f"⚠️ 找不到代號 {code}。")
+
+@bot.command()
+async def 命名(ctx, code: str, name: str):
+    data = load_data()
+    if code in data:
+        data[code]['name'] = name
+        save_data(data)
+        await ctx.send(f"✅ 已將代號 **{code}** 命名為 **{name}**")
+    else: await ctx.send(f"⚠️ 找不到代號 {code}。")
+
+@bot.command()
+async def 刪除(ctx, code: str):
+    data = load_data()
+    if code in data:
+        name = data[code].get('name', '')
+        del data[code]
+        save_data(data)
+        await ctx.send(f"🗑️ 已從監控列表移除 **{code} {name}**。")
+    else: await ctx.send(f"⚠️ 找不到代號 {code}")
+
+@bot.command()
+async def 策略(ctx, code: str, strat_num: str):
+    full_strat = STRAT_MAP.get(strat_num, strat_num)
+    data = load_data()
+    if code in data:
+        data[code]['strategy'] = full_strat
+        save_data(data)
+        name = data[code].get('name', '')
+        await ctx.send(f"✅ **{code} {name}** 策略已更新為: `{full_strat}`")
+    else: await ctx.send(f"⚠️ 找不到代號 {code}。")
+
+async def start_web_server():
+    app = web.Application()
+    app.router.add_get('/', lambda r: web.Response(text="Cloud Secretary Guardian is running!"))
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', int(os.environ.get('PORT', 8080)))
+    await site.start()
+
+async def main():
+    await asyncio.gather(start_web_server(), bot.start(TOKEN))
+
+if __name__ == "__main__":
+    asyncio.run(main())
