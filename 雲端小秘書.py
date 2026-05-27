@@ -149,7 +149,7 @@ async def start_web_server():
 
 async def main():
     # 記得替換成你最新的 Token！
-    TOKEN = 'MTUwOTA1OTAyMTc3MDg1MDM2NQ.GXXDe2.QvvTD9NgktsAphkP4YkVlLQT5MEZ7aVncsQxCY' 
+    TOKEN = '' 
     
     # 同時啟動網頁伺服器和機器人
     await asyncio.gather(
