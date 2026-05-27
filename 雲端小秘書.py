@@ -72,7 +72,6 @@ def run_health_check():
                     break
             except: continue
         
-        # 取得自訂股票名稱
         stock_name = info.get('name', '')
         display_title = f"{code} {stock_name}".strip()
         
@@ -88,6 +87,10 @@ def run_health_check():
         cost = info.get('buy_price', 0)
         strat = info.get('strategy', '無')
         profit = round(((close - cost) / cost) * 100, 2) if cost > 0 else 0
+        
+        # 讀取自訂停損停利點
+        tp_pct = info.get('tp_pct', None)
+        sl_pct = info.get('sl_pct', None)
         
         ma20 = latest['SMA_20'].item()
         bb_upper = latest['BB_Upper'].item()
@@ -105,39 +108,48 @@ def run_health_check():
         custom_panel = ""
         alert_msg = ""
         
-        if "1" in strat or "布林" in strat:
-            custom_panel = f"布林: 下軌 `{round(bb_lower, 2)}` | 上軌 `{round(bb_upper, 2)}`"
-            if close < bb_lower:
-                alert_msg = "🚨 [快出場] 爆量跌破下軌！(主力逃命)" if is_high_vol else "⚠️ [注意] 無量跌破下軌 (小心假跌破)"
-            elif close > bb_upper:
-                alert_msg = "🔥 [動能強] 帶量突破上軌！" if is_high_vol else "🤔 [觀察] 無量上漲 (可能後繼無力)"
-                
-        elif "2" in strat or "MACD" in strat:
-            custom_panel = f"MACD: `{macd_status}` | 月線: `{round(ma20, 2)}`"
-            if prev['MACD'].item() > prev['Signal'].item() and macd_val < sig_val:
-                alert_msg = "📉 [警告] MACD 爆量死叉！" if is_high_vol else "📉 [警告] MACD 無量死叉 (動能衰退)"
-            elif close < ma20:
-                alert_msg = "🚨 [危險] 爆量跌破月線！" if is_high_vol else "⚠️ [注意] 縮量跌破月線 (先別急著砍)"
-                
-        elif "3" in strat or "RSI" in strat:
-            custom_panel = f"RSI: `{round(rsi_val, 2)}` | 月線: `{round(ma20, 2)}`"
-            if rsi_val < 30:
-                alert_msg = "🟢 [超賣] RSI 低於 30，留意反彈"
-            elif rsi_val > 70:
-                alert_msg = "🔴 [超買] RSI 高於 70，留意過熱"
-                
-        else:
-            custom_panel = f"月線: `{round(ma20, 2)}`"
+        # ====== 🛡️ 第一層防護網：風控 % 數硬限制 (最高優先級) ======
+        if tp_pct and profit >= float(tp_pct):
+            alert_msg = f"💰 [獲利出場] 報酬率 {profit}% 已達設定停利點 (+{tp_pct}%)！"
+        elif sl_pct and profit <= -float(sl_pct):
+            alert_msg = f"🛑 [落跑停損] 報酬率 {profit}% 已達硬性停損點 (-{sl_pct}%)！"
             
-        if close < ma20 and not alert_msg:
-            alert_msg = "🚨 爆量跌破月線！" if is_high_vol else "⚠️ 縮量跌破月線 (觀察中)"
-            
+        # ====== 📈 第二層防護網：原本的技術指標策略 ======
+        if not alert_msg:
+            if "1" in strat or "布林" in strat:
+                custom_panel = f"布林: 下軌 `{round(bb_lower, 2)}` | 上軌 `{round(bb_upper, 2)}`"
+                if close < bb_lower:
+                    alert_msg = "🚨 [快出場] 爆量跌破下軌！(主力逃命)" if is_high_vol else "⚠️ [注意] 無量跌破下軌 (小心假跌破)"
+                elif close > bb_upper:
+                    alert_msg = "🔥 [動能強] 帶量突破上軌！" if is_high_vol else "🤔 [觀察] 無量上漲 (可能後繼無力)"
+                    
+            elif "2" in strat or "MACD" in strat:
+                custom_panel = f"MACD: `{macd_status}` | 月線: `{round(ma20, 2)}`"
+                if prev['MACD'].item() > prev['Signal'].item() and macd_val < sig_val:
+                    alert_msg = "📉 [警告] MACD 爆量死叉！" if is_high_vol else "📉 [警告] MACD 無量死叉 (動能衰退)"
+                elif close < ma20:
+                    alert_msg = "🚨 [危險] 爆量跌破月線！" if is_high_vol else "⚠️ [注意] 縮量跌破月線 (先別急著砍)"
+                    
+            elif "3" in strat or "RSI" in strat:
+                custom_panel = f"RSI: `{round(rsi_val, 2)}` | 月線: `{round(ma20, 2)}`"
+                if rsi_val < 30:
+                    alert_msg = "🟢 [超賣] RSI 低於 30，留意反彈"
+                elif rsi_val > 70:
+                    alert_msg = "🔴 [超買] RSI 高於 70，留意過熱"
+            else:
+                custom_panel = f"月線: `{round(ma20, 2)}`"
+                
+            if close < ma20 and not alert_msg:
+                alert_msg = "🚨 爆量跌破月線！" if is_high_vol else "⚠️ 縮量跌破月線 (觀察中)"
+                
         if not alert_msg:
             alert_msg = "👌 狀態穩定"
             
-        # 標題加入名稱
+        # 顯示風控設定文字
+        tp_sl_info = f" | 停利: `+{tp_pct}%` 停損: `-{sl_pct}%`" if (tp_pct or sl_pct) else " | 風控: `未設定`"
+        
         msg += f"📌 **{display_title}**\n"
-        msg += f"   市價: `{round(close, 2)}` | 成本: `{cost}` | 報酬: `{profit}%`\n"
+        msg += f"   市價: `{round(close, 2)}` | 成本: `{cost}` | 報酬: `{profit}%`{tp_sl_info}\n"
         msg += f"   策略: `{strat}`\n"
         msg += f"   指標: {custom_panel}\n"
         msg += f"   👉 {alert_msg}\n"
@@ -153,10 +165,8 @@ bot = commands.Bot(command_prefix='!', intents=intents)
 async def auto_report():
     tw_tz = timezone(timedelta(hours=8))
     now = datetime.now(tw_tz)
+    if now.weekday() > 4: return 
     
-    if now.weekday() > 4:
-        return 
-        
     current_time = now.time()
     start_time = time(hour=9, minute=30)
     end_time = time(hour=14, minute=0)
@@ -184,32 +194,51 @@ async def 健檢(ctx):
         result = await asyncio.wait_for(asyncio.to_thread(run_health_check), timeout=30.0)
         await msg.edit(content=result)
     except asyncio.TimeoutError:
-        await msg.edit(content="⚠️ 運算逾時，Yahoo財經目前回應緩慢，請稍後再試。")
+        await msg.edit(content="⚠️ 運算逾時，請稍後再試。")
 
 @bot.command()
-async def 新增(ctx, code: str, price: float, strat_num: str, name: str = ""):
-    """可選填名稱：!新增 2330 1000 1 台積電"""
+async def 新增(ctx, code: str, price: float, strat_num: str, name: str = "", tp: float = None, sl: float = None):
+    """
+    指令格式：!新增 [代號] [成本] [策略編號] [名稱] [停利%] [停損%]
+    範例一（含風控）：!新增 2330 1000 2 台積電 15 7
+    範例二（不設風控）：!新增 2317 150 1 鴻海
+    """
     full_strat = STRAT_MAP.get(strat_num, strat_num) 
     data = load_data()
     data[code] = {
         "buy_price": price, 
         "strategy": full_strat,
-        "name": name  # 存入名稱
+        "name": name,
+        "tp_pct": tp,
+        "sl_pct": sl
     }
     save_data(data)
     display_title = f"{code} {name}".strip()
-    await ctx.send(f"✅ 已新增 **{display_title}**\n成本: `{price}`\n策略: `{full_strat}`")
+    风控文 = f" | 停利: +{tp}% 停損: -{sl}%" if (tp or sl) else " | 未設定風控"
+    await ctx.send(f"✅ 已新增 **{display_title}**\n成本: `{price}`\n策略: `{full_strat}`{风控文}")
+
+@bot.command()
+async def 風控(ctx, code: str, tp: float, sl: float):
+    """幫舊股票補上或修改風控：%數不用打%號。範例：!風控 6147 20 5"""
+    data = load_data()
+    if code in data:
+        data[code]['tp_pct'] = tp
+        data[code]['sl_pct'] = sl
+        save_data(data)
+        name = data[code].get('name', '')
+        await ctx.send(f"✅ **{code} {name}** 風控設定成功！\n🎯 停利點: `+{tp}%`\n🛑 停損點: `-{sl}%`")
+    else:
+        await ctx.send(f"⚠️ 找不到代號 {code}，請先用 !新增 指令。")
 
 @bot.command()
 async def 命名(ctx, code: str, name: str):
-    """幫已存在的股票命名：!命名 2330 台積電"""
     data = load_data()
     if code in data:
         data[code]['name'] = name
         save_data(data)
         await ctx.send(f"✅ 已將代號 **{code}** 命名為 **{name}**")
     else:
-        await ctx.send(f"⚠️ 找不到代號 {code}，請先用 !新增 指令。")
+        await ctx.send(f"⚠️ 找不到代號 {code}。")
 
 @bot.command()
 async def 刪除(ctx, code: str):
@@ -234,9 +263,6 @@ async def 策略(ctx, code: str, strat_num: str):
     else:
         await ctx.send(f"⚠️ 找不到代號 {code}。")
 
-# =====================================================================
-# Render 雲端維持運行用的虛擬伺服器
-# =====================================================================
 async def start_web_server():
     app = web.Application()
     app.router.add_get('/', lambda r: web.Response(text="Bot is running!"))
