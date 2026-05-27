@@ -6,11 +6,12 @@ import json
 import os
 import asyncio
 import logging
+from aiohttp import web # 🌟 新增：讓機器人可以假裝是網頁伺服器
 
 logging.getLogger('yfinance').setLevel(logging.CRITICAL)
 
 # ==========================================
-# 📱 雲端系統設定 (存檔會跟著程式放在雲端資料夾)
+# 📱 雲端系統設定 
 # ==========================================
 PORTFOLIO_FILE = "cloud_portfolio.json"
 
@@ -20,7 +21,6 @@ STRAT_MAP = {
     "3": "3. RSI超賣反彈 (逆勢)"
 }
 
-# 確保雲端存檔存在
 if not os.path.exists(PORTFOLIO_FILE):
     with open(PORTFOLIO_FILE, 'w', encoding='utf-8') as f:
         json.dump({}, f)
@@ -114,30 +114,48 @@ async def 健檢(ctx):
 
 @bot.command()
 async def 新增(ctx, code: str, price: float, strat_num: str):
-    """用法: !新增 2330 800 2 (1:布林 2:MACD 3:RSI)"""
     if strat_num not in STRAT_MAP:
-        await ctx.send("❌ 策略代號錯誤！請輸入 1(布林), 2(MACD), 或 3(RSI)。\n範例：`!新增 2330 800 2`")
+        await ctx.send("❌ 策略代號錯誤！請輸入 1(布林), 2(MACD), 或 3(RSI)。")
         return
-    
     portfolio = load_data()
-    portfolio[code] = {
-        "buy_price": price,
-        "strategy": STRAT_MAP[strat_num],
-        "highest_price": price
-    }
+    portfolio[code] = {"buy_price": price, "strategy": STRAT_MAP[strat_num], "highest_price": price}
     save_data(portfolio)
-    await ctx.send(f"✅ 報告老闆！已將 **{code}** (買價 {price}, 策略 {STRAT_MAP[strat_num].split(' ')[1]}) 寫入雲端追蹤庫！")
+    await ctx.send(f"✅ 已將 **{code}** 寫入雲端追蹤庫！")
 
 @bot.command()
 async def 刪除(ctx, code: str):
-    """用法: !刪除 2330"""
     portfolio = load_data()
     if code in portfolio:
         del portfolio[code]
         save_data(portfolio)
-        await ctx.send(f"🗑️ 已從雲端資料庫停止追蹤 **{code}**。")
+        await ctx.send(f"🗑️ 已停止追蹤 **{code}**。")
     else:
         await ctx.send(f"⚠️ 雲端資料庫中找不到 **{code}**。")
 
-# 🔑 在這裡貼上你的 Bot Token
-bot.run('MTUwOTA1OTAyMTc3MDg1MDM2NQ.GXXDe2.QvvTD9NgktsAphkP4YkVlLQT5MEZ7aVncsQxCY')
+# ==========================================
+# 🌟 Render 防當機機制：建立一個假的網頁伺服器
+# ==========================================
+async def handle(request):
+    return web.Response(text="Bot is running!")
+
+async def start_web_server():
+    app = web.Application()
+    app.router.add_get('/', handle)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', int(os.environ.get('PORT', 8080)))
+    await site.start()
+    print("✅ 虛擬網頁伺服器已啟動，用來騙過 Render 的檢查。")
+
+async def main():
+    # 記得替換成你最新的 Token！
+    TOKEN = 'YOUR_BOT_TOKEN_HERE' 
+    
+    # 同時啟動網頁伺服器和機器人
+    await asyncio.gather(
+        start_web_server(),
+        bot.start(TOKEN)
+    )
+
+if __name__ == "__main__":
+    asyncio.run(main())
