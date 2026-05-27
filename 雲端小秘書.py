@@ -1,14 +1,19 @@
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 import yfinance as yf
 import pandas as pd
 import json
 import os
 import asyncio
 from aiohttp import web
+from datetime import time, timezone, timedelta
 
 TOKEN = os.environ['DISCORD_TOKEN']
 PORTFOLIO_FILE = "my_portfolio.json"
+
+# ========= 🚨 請在這裡貼上你的 Discord 頻道 ID =========
+PUSH_CHANNEL_ID = 1509058179458404495  # <--- 換成你剛剛複製的數字
+# ========================================================
 
 STRAT_MAP = {
     "1": "1. 布林壓縮突破 (動能)",
@@ -26,22 +31,20 @@ def save_data(data):
         json.dump(data, f, indent=4, ensure_ascii=False)
 
 def calculate_indicators(df):
-    """計算所有技術指標"""
-    # 月線
+    """計算技術指標與成交量防呆"""
     df['SMA_20'] = df['Close'].rolling(window=20).mean()
+    # 防呆機制：5日均量
+    df['Vol_5MA'] = df['Volume'].rolling(window=5).mean()
     
-    # 布林通道
     std = df['Close'].rolling(window=20).std()
     df['BB_Upper'] = df['SMA_20'] + (2 * std)
     df['BB_Lower'] = df['SMA_20'] - (2 * std)
     
-    # MACD
     ema12 = df['Close'].ewm(span=12, adjust=False).mean()
     ema26 = df['Close'].ewm(span=26, adjust=False).mean()
     df['MACD'] = ema12 - ema26
     df['Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
     
-    # RSI (14日)
     delta = df['Close'].diff()
     gain = delta.where(delta > 0, 0)
     loss = -delta.where(delta < 0, 0)
@@ -64,15 +67,14 @@ def run_health_check():
         df = None
         for t in tickers:
             try:
-                d = yf.Ticker(t).history(period="3mo") # 抓3個月確保RSI計算精準
+                d = yf.Ticker(t).history(period="3mo")
                 if len(d) > 30: 
                     df = d
                     break
-            except:
-                continue
+            except: continue
         
         if df is None or len(df) <= 30:
-            msg += f"❌ **{code}**: 抓取失敗或資料不足\n\n"
+            msg += f"❌ **{code}**: 抓取失敗\n\n"
             continue
             
         df = calculate_indicators(df)
@@ -84,53 +86,54 @@ def run_health_check():
         strat = info.get('strategy', '無')
         profit = round(((close - cost) / cost) * 100, 2) if cost > 0 else 0
         
-        # 指標數值提取
+        # 指標與防呆判定
         ma20 = latest['SMA_20'].item()
         bb_upper = latest['BB_Upper'].item()
         bb_lower = latest['BB_Lower'].item()
         macd_val = latest['MACD'].item()
         sig_val = latest['Signal'].item()
-        prev_macd = prev['MACD'].item()
-        prev_sig = prev['Signal'].item()
         rsi_val = latest['RSI'].item()
+        
+        latest_vol = latest['Volume'].item()
+        vol_5ma = latest['Vol_5MA'].item()
+        is_high_vol = latest_vol > vol_5ma # 是否爆量
         
         macd_status = "✅ 多頭" if macd_val > sig_val else "⚠️ 空頭"
         
-        # --- 依據不同策略顯示專屬面板 ---
         custom_panel = ""
         alert_msg = ""
         
+        # 依據策略與成交量判斷
         if "1" in strat or "布林" in strat:
-            custom_panel = f"布林防線: 下軌 `{round(bb_lower, 2)}` | 上軌 `{round(bb_upper, 2)}`"
+            custom_panel = f"布林: 下軌 `{round(bb_lower, 2)}` | 上軌 `{round(bb_upper, 2)}`"
             if close < bb_lower:
-                alert_msg = "🚨 [快出場] 跌破布林下軌！"
+                alert_msg = "🚨 [快出場] 爆量跌破下軌！(主力逃命)" if is_high_vol else "⚠️ [注意] 無量跌破下軌 (小心假跌破)"
             elif close > bb_upper:
-                alert_msg = "🔥 [動能強] 突破布林上軌！"
+                alert_msg = "🔥 [動能強] 帶量突破上軌！" if is_high_vol else "🤔 [觀察] 無量上漲 (可能後繼無力)"
                 
         elif "2" in strat or "MACD" in strat:
             custom_panel = f"MACD: `{macd_status}` | 月線: `{round(ma20, 2)}`"
-            if prev_macd > prev_sig and macd_val < sig_val:
-                alert_msg = "📉 [警告] MACD 死叉成形！"
-            elif prev_macd < prev_sig and macd_val > sig_val:
-                alert_msg = "🚀 [訊號] MACD 金叉！"
+            if prev['MACD'].item() > prev['Signal'].item() and macd_val < sig_val:
+                alert_msg = "📉 [警告] MACD 爆量死叉！" if is_high_vol else "📉 [警告] MACD 無量死叉 (動能衰退)"
+            elif close < ma20:
+                alert_msg = "🚨 [危險] 爆量跌破月線！" if is_high_vol else "⚠️ [注意] 縮量跌破月線 (先別急著砍)"
                 
         elif "3" in strat or "RSI" in strat:
-            custom_panel = f"RSI (14日): `{round(rsi_val, 2)}` | 月線: `{round(ma20, 2)}`"
+            custom_panel = f"RSI: `{round(rsi_val, 2)}` | 月線: `{round(ma20, 2)}`"
             if rsi_val < 30:
                 alert_msg = "🟢 [超賣] RSI 低於 30，留意反彈"
             elif rsi_val > 70:
                 alert_msg = "🔴 [超買] RSI 高於 70，留意過熱"
+                
         else:
             custom_panel = f"月線: `{round(ma20, 2)}`"
             
-        # 通用防守線警告 (跌破月線)
         if close < ma20 and not alert_msg:
-            alert_msg = "⚠️ [注意] 跌破月線 (20MA)"
+            alert_msg = "🚨 爆量跌破月線！" if is_high_vol else "⚠️ 縮量跌破月線 (觀察中)"
             
         if not alert_msg:
             alert_msg = "👌 狀態穩定"
             
-        # 顯示排版 (加入 \n\n 確保不同股票之間有空行斷開)
         msg += f"📌 **{code}**\n"
         msg += f"   市價: `{round(close, 2)}` | 成本: `{cost}` | 報酬: `{profit}%`\n"
         msg += f"   策略: `{strat}`\n"
@@ -144,9 +147,28 @@ intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix='!', intents=intents)
 
+# --- 每日定時推播設定 (台灣時間下午 14:00) ---
+tw_tz = timezone(timedelta(hours=8))
+target_time = time(hour=14, minute=0, tzinfo=tw_tz)
+
+@tasks.loop(time=target_time)
+async def daily_report():
+    channel = bot.get_channel(PUSH_CHANNEL_ID)
+    if channel:
+        result = await asyncio.to_thread(run_health_check)
+        await channel.send(f"🔔 **【每日收盤總結】自動推播**\n{result}")
+
+@bot.event
+async def on_ready():
+    print(f"Bot 登入成功: {bot.user}")
+    if not daily_report.is_running():
+        daily_report.start()
+        print("每日推播排程已啟動！")
+# ---------------------------------------------
+
 @bot.command()
 async def 健檢(ctx):
-    msg = await ctx.send("⏳ 正在分析技術指標與策略面板...")
+    msg = await ctx.send("⏳ 正在分析量價關係與技術指標...")
     try:
         result = await asyncio.wait_for(asyncio.to_thread(run_health_check), timeout=30.0)
         await msg.edit(content=result)
