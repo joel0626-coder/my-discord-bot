@@ -1,84 +1,84 @@
 import discord
 from discord.ext import commands
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
 import yfinance as yf
 import pandas as pd
 import json
 import os
 import asyncio
+import twstock  # 🌟 自動查中文股名用
 from aiohttp import web
 
-# 環境設定
+# 強制讀取環境變數
 TOKEN = os.environ['DISCORD_TOKEN']
 PORTFOLIO_FILE = "my_portfolio.json"
-bot = commands.Bot(command_prefix='!', intents=discord.Intents.default())
 
 def load_data():
     if not os.path.exists(PORTFOLIO_FILE): return {}
     with open(PORTFOLIO_FILE, 'r', encoding='utf-8') as f: return json.load(f)
 
-# V5.6 完整指標計算
-def calculate_indicators(df):
-    df['SMA_20'] = df['Close'].rolling(window=20).mean()
-    std = df['Close'].rolling(window=20).std()
-    df['BB_Lower'] = df['SMA_20'] - (2 * std)
-    df['MACD'] = df['Close'].ewm(span=12, adjust=False).mean() - df['Close'].ewm(span=26, adjust=False).mean()
-    df['Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
-    return df
+def save_data(data):
+    with open(PORTFOLIO_FILE, 'w', encoding='utf-8') as f: json.dump(data, f, indent=4, ensure_ascii=False)
 
-# 核心判斷邏輯
-async def auto_check_logic():
+# 自動獲取中文股名函數
+def get_stock_name(code):
+    stock = twstock.stock(code)
+    # 若抓不到則顯示代號
+    return stock.name if stock else code
+
+def run_health_check():
     portfolio = load_data()
-    channel = bot.get_channel(你的群組頻道ID) # ⚠️ 請填入你的頻道ID
-    if not channel: return
-
-    msg = "⏰ **【盤中自動巡航報表】**\n"
-    for code, info in portfolio.items():
-        ticker = f"{code}.TW" if int(code) > 2000 else f"{code}.TWO"
-        df = yf.download(ticker, period="3mo", progress=False)
-        if df.empty: continue
-        
-        df = calculate_indicators(df)
-        curr = df.iloc[-1]
-        close = curr['Close'].item()
-        
-        # 策略判斷
-        defense = info.get('highest_price', info['buy_price']) * 0.9
-        alert = ""
-        if close <= defense: alert = "🚨 跌破防守線，快出場！"
-        elif curr['MACD'] < curr['Signal']: alert = "📉 MACD 出現死叉"
-        
-        if alert:
-            msg += f"⚠️ **{code}**: {alert}\n"
+    if not portfolio: return "⚠️ 資料庫為空。"
     
-    if len(msg) > 30: await channel.send(msg)
+    msg = "📊 **【雲端即時戰報】**\n--------------------\n"
+    for code, info in portfolio.items():
+        # 自動偵測 TW/TWO 格式
+        ticker = f"{code}.TW" if int(code) > 2000 else f"{code}.TWO"
+        df = yf.download(ticker, period="1mo", progress=False)
+        
+        if df.empty:
+            msg += f"⚠️ **{code}** | 抓不到報價\n"
+            continue
+            
+        close = df['Close'].iloc[-1].item()
+        name = get_stock_name(code) # 🌟 自動查名
+        buy_price = info.get('buy_price', 0)
+        strat = info.get('strategy', '未設定')
+        profit = round(((close - buy_price) / buy_price) * 100, 2)
+        
+        msg += f"✅ **{name} ({code})**\n"
+        msg += f"   現價: `{round(close, 2)}` | 報酬: `{profit}%` | 策略: {strat}\n\n"
+    return msg
 
-# 機器人指令
-@bot.event
-async def on_ready():
-    scheduler = AsyncIOScheduler()
-    # 設定 09:30-13:00 每半小時執行一次
-    scheduler.add_job(auto_check_logic, 'cron', hour='9-13', minute='*/30')
-    scheduler.start()
-    print("✅ 雲端小秘書已上線並啟動定時巡航！")
+intents = discord.Intents.default()
+intents.message_content = True
+bot = commands.Bot(command_prefix='!', intents=intents)
 
 @bot.command()
 async def 健檢(ctx):
-    result = await asyncio.to_thread(run_health_check_sync)
+    await ctx.message.add_reaction("⏳")
+    result = await asyncio.to_thread(run_health_check)
     await ctx.send(result)
+    await ctx.message.remove_reaction("⏳", bot.user)
+    await ctx.message.add_reaction("✅")
 
-# 為了配合 async 運作的同步函數
-def run_health_check_sync():
-    # 此處放置與 auto_check_logic 相同的資料抓取與回傳邏輯
-    return "執行中..."
+@bot.command()
+async def 新增(ctx, code: str, price: float, strategy: str):
+    data = load_data()
+    data[code] = {"buy_price": price, "strategy": strategy}
+    save_data(data)
+    await ctx.send(f"✅ {get_stock_name(code)} ({code}) 已加入監控。")
 
+# Render 必須
 async def start_web_server():
     app = web.Application()
-    app.router.add_get('/', lambda r: web.Response(text="Bot is running!"))
+    app.router.add_get('/', lambda r: web.Response(text="Bot is alive!"))
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, '0.0.0.0', int(os.environ.get('PORT', 8080)))
     await site.start()
+
+async def main():
+    await asyncio.gather(start_web_server(), bot.start(TOKEN))
 
 if __name__ == "__main__":
     asyncio.run(main())
