@@ -18,26 +18,29 @@ def run_health_check():
     if not portfolio: return "⚠️ 資料庫為空。"
     
     msg = "📊 **【雲端即時戰報】**\n--------------------\n"
+    # 增加一個偽裝參數，避免被 Yahoo 擋住
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36'}
+    
     for code, info in portfolio.items():
-        # 強制測試兩套規則
-        tickers = [f"{code}.TW", f"{code}.TWO", f"{code}"]
-        df = pd.DataFrame()
+        # 自動嘗試上市 (.TW) 或上櫃 (.TWO)
+        tickers = [f"{code}.TW", f"{code}.TWO"]
+        found_price = None
         
         for t in tickers:
-            df = yf.download(t, period="1mo", progress=False)
-            if not df.empty: 
-                break
+            try:
+                # 限制下載時間，確保不當機
+                data = yf.Ticker(t).history(period="1d")
+                if not data.empty:
+                    found_price = data['Close'].iloc[-1].item()
+                    break
+            except: continue
             
-        if df.empty:
-            msg += f"❌ **{code}**: 抓取失敗 (Yahoo 查無此號)\n"
-            continue
-            
-        latest_price = df['Close'].iloc[-1].item()
-        buy_price = info.get('buy_price', 0)
-        profit = round(((latest_price - buy_price) / buy_price) * 100, 2)
-        
-        msg += f"✅ **{code}** | 市價: `{round(latest_price, 2)}` | 報酬: `{profit}%`\n"
-        msg += f"   └ 策略: {info.get('strategy', '無')}\n\n"
+        if found_price:
+            buy_price = info.get('buy_price', 0)
+            profit = round(((found_price - buy_price) / buy_price) * 100, 2)
+            msg += f"✅ **{code}** | 市價: `{round(found_price, 2)}` | 報酬: `{profit}%`\n"
+        else:
+            msg += f"❌ **{code}**: 抓取逾時/失敗\n"
     return msg
 
 intents = discord.Intents.default()
@@ -46,19 +49,23 @@ bot = commands.Bot(command_prefix='!', intents=intents)
 
 @bot.command()
 async def 健檢(ctx):
-    # 增加一個「正在抓取」的反饋，防止以為當機
-    msg = await ctx.send("⏳ 正在連線 Yahoo 財經撈取最新報價...")
-    result = await asyncio.to_thread(run_health_check)
-    await msg.edit(content=result)
+    # 改為發送訊息後，再進行編輯，這樣比較不會出現「已讀不回」的錯覺
+    msg = await ctx.send("⏳ 正在撈取最新報價 (如超過 10 秒代表 Yahoo 反應慢)...")
+    try:
+        # 給予 15 秒執行上限
+        result = await asyncio.wait_for(asyncio.to_thread(run_health_check), timeout=15.0)
+        await msg.edit(content=result)
+    except asyncio.TimeoutError:
+        await msg.edit(content="⚠️ 撈取資料逾時，請稍後再試。")
 
 @bot.command()
 async def 新增(ctx, code: str, price: float, strat: str):
     data = load_data()
     data[code] = {"buy_price": price, "strategy": strat}
     with open(PORTFOLIO_FILE, 'w', encoding='utf-8') as f: json.dump(data, f, indent=4, ensure_ascii=False)
-    await ctx.send(f"✅ 已新增 {code} 到雲端監控。")
+    await ctx.send(f"✅ 已新增 {code}。")
 
-# Render 防止關機
+# Render 必須要有 Web Server
 async def start_web_server():
     app = web.Application()
     app.router.add_get('/', lambda r: web.Response(text="Bot is running!"))
