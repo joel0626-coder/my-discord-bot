@@ -11,36 +11,42 @@ PORTFOLIO_FILE = "my_portfolio.json"
 
 def load_data():
     if not os.path.exists(PORTFOLIO_FILE): return {}
-    with open(PORTFOLIO_FILE, 'r', encoding='utf-8') as f: return json.load(f)
+    with open(PORTFOLIO_FILE, 'r', encoding='utf-8') as f: 
+        return json.load(f)
+
+def save_data(data):
+    with open(PORTFOLIO_FILE, 'w', encoding='utf-8') as f: 
+        json.dump(data, f, indent=4, ensure_ascii=False)
 
 def run_health_check():
     portfolio = load_data()
     if not portfolio: return "⚠️ 資料庫為空。"
     
-    msg = "📊 **【雲端即時戰報】**\n--------------------\n"
-    # 增加一個偽裝參數，避免被 Yahoo 擋住
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36'}
-    
+    # 這裡加入換行符號 \n 確保版面整齊
+    msg = "📊 **【雲端即時戰報】**\n"
+    msg += "------------------------------\n"
     for code, info in portfolio.items():
-        # 自動嘗試上市 (.TW) 或上櫃 (.TWO)
-        tickers = [f"{code}.TW", f"{code}.TWO"]
-        found_price = None
-        
+        tickers = [f"{code}.TW", f"{code}.TWO", f"{code}"]
+        df = None
         for t in tickers:
-            try:
-                # 限制下載時間，確保不當機
-                data = yf.Ticker(t).history(period="1d")
-                if not data.empty:
-                    found_price = data['Close'].iloc[-1].item()
-                    break
-            except: continue
+            d = yf.Ticker(t).history(period="1d")
+            if not d.empty:
+                df = d
+                break
+        
+        if df is None or df.empty:
+            msg += f"❌ **{code}**: 抓取失敗\n"
+            continue
             
-        if found_price:
-            buy_price = info.get('buy_price', 0)
-            profit = round(((found_price - buy_price) / buy_price) * 100, 2)
-            msg += f"✅ **{code}** | 市價: `{round(found_price, 2)}` | 報酬: `{profit}%`\n"
-        else:
-            msg += f"❌ **{code}**: 抓取逾時/失敗\n"
+        latest_price = df['Close'].iloc[-1].item()
+        cost = info.get('buy_price', 0)
+        strat = info.get('strategy', '無')
+        profit = round(((latest_price - cost) / cost) * 100, 2)
+        
+        # 這裡明確顯示所有欄位
+        msg += f"✅ **{code}**\n"
+        msg += f"   市價: `{round(latest_price, 2)}` | 成本: `{cost}`\n"
+        msg += f"   報酬: `{profit}%` | 策略: `{strat}`\n\n"
     return msg
 
 intents = discord.Intents.default()
@@ -49,23 +55,32 @@ bot = commands.Bot(command_prefix='!', intents=intents)
 
 @bot.command()
 async def 健檢(ctx):
-    # 改為發送訊息後，再進行編輯，這樣比較不會出現「已讀不回」的錯覺
-    msg = await ctx.send("⏳ 正在撈取最新報價 (如超過 10 秒代表 Yahoo 反應慢)...")
+    msg = await ctx.send("⏳ 正在撈取最新報價...")
     try:
-        # 給予 15 秒執行上限
-        result = await asyncio.wait_for(asyncio.to_thread(run_health_check), timeout=15.0)
+        result = await asyncio.wait_for(asyncio.to_thread(run_health_check), timeout=20.0)
         await msg.edit(content=result)
-    except asyncio.TimeoutError:
-        await msg.edit(content="⚠️ 撈取資料逾時，請稍後再試。")
+    except:
+        await msg.edit(content="⚠️ 撈取逾時。")
 
 @bot.command()
 async def 新增(ctx, code: str, price: float, strat: str):
     data = load_data()
     data[code] = {"buy_price": price, "strategy": strat}
-    with open(PORTFOLIO_FILE, 'w', encoding='utf-8') as f: json.dump(data, f, indent=4, ensure_ascii=False)
-    await ctx.send(f"✅ 已新增 {code}。")
+    save_data(data)
+    await ctx.send(f"✅ 已新增 {code} (成本:{price}, 策略:{strat})")
 
-# Render 必須要有 Web Server
+@bot.command()
+async def 刪除(ctx, code: str):
+    data = load_data()
+    # 確保字串比對正確
+    if code in data:
+        del data[code]
+        save_data(data)
+        await ctx.send(f"🗑️ 已從監控列表移除 {code}。")
+    else:
+        await ctx.send(f"⚠️ 找不到代號 {code} (JSON內代號為: {list(data.keys())})")
+
+# Render Web Server
 async def start_web_server():
     app = web.Application()
     app.router.add_get('/', lambda r: web.Response(text="Bot is running!"))
