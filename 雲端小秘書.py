@@ -156,6 +156,8 @@ async def auto_report():
     if channel:
         result = await asyncio.to_thread(run_health_check)
         await channel.send(f"🔔 **【系統測試】5分鐘定時推播**\n{result}")
+    else:
+        print(f"❌ 嚴重錯誤：找不到頻道 ID {PUSH_CHANNEL_ID}，請檢查機器人是否有讀寫權限！")
 
 @bot.event
 async def on_ready():
@@ -165,13 +167,6 @@ async def on_ready():
         print("5分鐘推播測試已啟動！")
 # ---------------------------------------------
 
-@bot.event
-async def on_ready():
-    print(f"Bot 登入成功: {bot.user}")
-    if not daily_report.is_running():
-        daily_report.start()
-        print("每日推播排程已啟動！")
-# ---------------------------------------------
 
 @bot.command()
 async def 健檢(ctx):
