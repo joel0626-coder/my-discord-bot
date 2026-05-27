@@ -7,10 +7,8 @@ import os
 import asyncio
 from aiohttp import web
 
-# 原本寫法：TOKEN = os.environ.get('DISCORD_TOKEN')
-# 改成這個強制讀取的方式：
+# 強制讀取 Token
 TOKEN = os.environ['DISCORD_TOKEN']
-
 PORTFOLIO_FILE = "cloud_portfolio.json"
 STRAT_MAP = {"1": "1. 布林壓縮突破", "2": "2. 雙均線+MACD", "3": "3. RSI超賣反彈"}
 
@@ -21,23 +19,33 @@ def load_data():
 def save_data(data):
     with open(PORTFOLIO_FILE, 'w', encoding='utf-8') as f: json.dump(data, f, indent=4, ensure_ascii=False)
 
-# 機器人邏輯
+def calculate_indicators(df):
+    df['SMA_20'] = df['Close'].rolling(window=20).mean()
+    df['MACD'] = df['Close'].ewm(span=12, adjust=False).mean() - df['Close'].ewm(span=26, adjust=False).mean()
+    df['Signal_Line'] = df['MACD'].ewm(span=9, adjust=False).mean()
+    return df
+
+def run_health_check():
+    portfolio = load_data()
+    if not portfolio: return "⚠️ 目前沒有持股資料。"
+    msg = "📊 **持股健檢報表**\n--------------------\n"
+    for code, info in portfolio.items():
+        df = yf.download(f"{code}.TW", period="6mo", progress=False)
+        if df.empty: df = yf.download(f"{code}.TWO", period="6mo", progress=False)
+        df = calculate_indicators(df)
+        close = df['Close'].iloc[-1].item()
+        msg += f"✅ **{code}** | 現價: {round(close, 2)}\n"
+    return msg
+
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix='!', intents=intents)
 
 @bot.command()
 async def 健檢(ctx):
-    # 增加一個「正在處理中」的反應圖示，讓你知道它在忙
     await ctx.message.add_reaction("⏳")
-    
-    # 執行健檢
     result_msg = await asyncio.to_thread(run_health_check)
-    
-    # 回覆結果
     await ctx.send(result_msg)
-    
-    # 執行完後，把那個⏳反應移除，這就是「結束」的信號
     await ctx.message.remove_reaction("⏳", bot.user)
     await ctx.message.add_reaction("✅")
 
@@ -48,7 +56,6 @@ async def 新增(ctx, code: str, price: float, strat_num: str):
     save_data(data)
     await ctx.send(f"✅ {code} 已加入監控。")
 
-# 2. Render 必備：建立虛擬 Web 服務防止被關機
 async def start_web_server():
     app = web.Application()
     app.router.add_get('/', lambda r: web.Response(text="Bot is alive!"))
