@@ -7,8 +7,9 @@ import os
 import asyncio
 from aiohttp import web
 
-# 1. 安全設定：從雲端主機系統讀取 Token，不要寫死在程式碼裡
-TOKEN = os.environ.get('DISCORD_TOKEN')
+# 原本寫法：TOKEN = os.environ.get('DISCORD_TOKEN')
+# 改成這個強制讀取的方式：
+TOKEN = os.environ['DISCORD_TOKEN']
 
 PORTFOLIO_FILE = "cloud_portfolio.json"
 STRAT_MAP = {"1": "1. 布林壓縮突破", "2": "2. 雙均線+MACD", "3": "3. RSI超賣反彈"}
