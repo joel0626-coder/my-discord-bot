@@ -21,11 +21,16 @@ def run_health_check():
     
     msg = "📊 **【雲端即時戰報】**\n--------------------\n"
     for code, info in portfolio.items():
-        ticker = f"{code}.TW" if int(code) > 2000 else f"{code}.TWO"
-        df = yf.download(ticker, period="1mo", progress=False)
+        # 自動重試機制：先試 TW，不行再試 TWO
+        ticker_tw = f"{code}.TW"
+        ticker_two = f"{code}.TWO"
         
+        df = yf.download(ticker_tw, period="1mo", progress=False)
         if df.empty:
-            msg += f"⚠️ **{code}** | 無法抓取報價\n"
+            df = yf.download(ticker_two, period="1mo", progress=False)
+            
+        if df.empty:
+            msg += f"⚠️ **{code}** | 抓不到報價 (請確認代號)\n"
             continue
             
         close = df['Close'].iloc[-1].item()
