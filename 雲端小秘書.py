@@ -148,10 +148,22 @@ def run_evaluation(code):
         is_uptrend = latest['SMA_60'].item() > prev1['SMA_60'].item()
         
         # ==== 策略條件審查 ====
-        bb_pass = (bb_width < 0.08) and (close > latest['BB_Upper'].item()) and (vol > (vol_20ma * 2)) and is_uptrend and (close > open_px)
+        # 1. 布林突破
+        bb_cond1 = bb_width < 0.08
+        bb_cond2 = close > latest['BB_Upper'].item()
+        bb_cond3 = vol > (vol_20ma * 2)
+        bb_pass = bb_cond1 and bb_cond2 and bb_cond3 and is_uptrend and (close > open_px)
+        
+        # 2. MACD 金叉
         macd_pass = is_uptrend and (close > ma60) and (prev_macd < prev_sig) and (macd > sig)
+        
+        # 3. RSI 反彈
         rsi_pass = (close < ma20 * 0.95) and (prev_rsi < 30) and (rsi >= 30)
+        
+        # 4. 多頭縮量回踩
         pullback_pass = is_uptrend and (close > ma60) and (low <= ma20 * 1.015) and (close > ma20) and (vol < vol_5ma)
+        
+        # 5. 強勢創高確認
         breakout_pass = is_uptrend and (ma20 > ma60) and (close > max20_prev) and (vol > vol_5ma * 1.5)
 
         # ==== 產生評估報告 (統一排版) ====
@@ -162,17 +174,22 @@ def run_evaluation(code):
         
         if bb_pass: msg += f"💥 **策略 1 (布林動能)**: ✅ 帶量突破上軌\n"
         else: msg += f"💥 **策略 1 (布林動能)**: ❌ 未達標\n"
+            
         if macd_pass: msg += f"🏄‍♂️ **策略 2 (MACD趨勢)**: ✅ 季線上黃金交叉\n"
         else: msg += f"🏄‍♂️ **策略 2 (MACD趨勢)**: ❌ 未達標\n"
+            
         if rsi_pass: msg += f"🎣 **策略 3 (RSI逆勢)**: ✅ 跌破超賣區後翻揚\n"
         else: msg += f"🎣 **策略 3 (RSI逆勢)**: ❌ 未達標\n"
+        
         if pullback_pass: msg += f"🛡️ **策略 4 (縮量回踩)**: ✅ **[高勝率]** 縮量回測月線有守\n"
         else: msg += f"🛡️ **策略 4 (縮量回踩)**: ❌ 未達標\n"
+            
         if breakout_pass: msg += f"🚀 **策略 5 (強勢創高)**: ✅ **[高勝率]** 帶量突破近一月新高\n"
         else: msg += f"🚀 **策略 5 (強勢創高)**: ❌ 未達標\n"
             
         msg += "=========================\n"
         
+        # 教練結論
         if bb_pass or macd_pass or rsi_pass or pullback_pass or breakout_pass:
             matched_strats = []
             if bb_pass: matched_strats.append("策略1")
@@ -236,45 +253,28 @@ def run_health_check():
             elif sl_pct and profit <= -float(sl_pct): alert_msg = f"🛑 [落跑停損] 報酬率 {profit}% 已達停損點 (-{sl_pct}%)！"
                 
             if not alert_msg:
-                # 策略 1
                 if "1" in strat or "布林" in strat:
                     custom_panel = f"上軌 `{round(bb_upper, 2)}` | 5日線 `{round(ma5, 2)}` | 10日線 `{round(ma10, 2)}`"
                     if close < ma10: alert_msg = "🚨 [快出場] 跌破 10 日線，動能消散！" if is_high_vol else "⚠️ [注意] 破 10 日線。"
                     elif close < ma5: alert_msg = "⚠️ [警訊] 跌破 5 日線，短線可能熄火。"
                     elif close > bb_upper: alert_msg = "🔥 [動能強] 帶量突破上軌！" if is_high_vol else "🤔 [觀察] 無量上漲。"
-                
-                # 策略 2
                 elif "2" in strat or "MACD" in strat:
                     custom_panel = f"MACD: `{macd_status}` | 10日線 `{round(ma10, 2)}` | 月線 `{round(ma20, 2)}`"
                     if prev['MACD'].item() > prev['Signal'].item() and macd_val < sig_val: alert_msg = "🚨 [逃命] MACD 死叉成形！"
                     elif hist_val > 0 and hist_val < prev_hist: alert_msg = "⚠️ [警訊] MACD 紅柱縮減，動能衰退。"
                     elif close < ma10: alert_msg = "📉 [轉弱] 跌破 10 日線，提防下探。"
-                
-                # 策略 3
                 elif "3" in strat or "RSI" in strat:
                     custom_panel = f"RSI: `{round(rsi_val, 2)}` | 5日線 `{round(ma5, 2)}`"
                     if rsi_val < prev_rsi and prev_rsi > 70: alert_msg = "🚨 [快跑] RSI 自高檔反轉向下！"
                     elif rsi_val > 75: alert_msg = "🔴 [極度超買] RSI 突破 75。"
                     elif rsi_val < 25: alert_msg = "🟢 [極度超賣] RSI 跌破 25，留意反彈。"
-                
-                # 🔥 策略 4 (更嚴格防守)
-                elif "4" in strat or "回踩" in strat:
-                    custom_panel = f"5日線 `{round(ma5, 2)}` | 月線 `{round(ma20, 2)}`"
-                    if close < ma20: alert_msg = "🚨 [防守失敗] 收盤跌破月線底線，立刻停損！"
-                    elif close < ma5: alert_msg = "⚠️ [轉弱] 反彈無力，跌破 5 日線。"
-                
-                # 🔥 策略 5 (更嚴格防守)
-                elif "5" in strat or "創高" in strat:
-                    custom_panel = f"5日線 `{round(ma5, 2)}` | 10日線 `{round(ma10, 2)}`"
-                    if close < ma10: alert_msg = "🚨 [假突破] 跌破 10 日線，強勢慣性改變，無情砍倉！"
-                    elif close < ma5: alert_msg = "⚠️ [警訊] 跌破 5 日線，極強動能消散。"
-                
-                # 通用底線
+                elif "4" in strat or "回踩" in strat or "5" in strat or "創高" in strat:
+                    custom_panel = f"10日線 `{round(ma10, 2)}` | 月線 `{round(ma20, 2)}`"
+                    if close < ma10: alert_msg = "⚠️ [警訊] 跌破 10 日線，趨勢轉弱。"
                 else:
                     custom_panel = f"10日線 `{round(ma10, 2)}` | 月線 `{round(ma20, 2)}`"
                     
-                if close < ma20 and not alert_msg and "3" not in strat: 
-                    alert_msg = "🚨 爆量跌破月線！" if is_high_vol else "⚠️ 縮量跌破月線"
+                if close < ma20 and not alert_msg: alert_msg = "🚨 爆量跌破月線！" if is_high_vol else "⚠️ 縮量跌破月線"
                     
             if not alert_msg: alert_msg = "👌 狀態穩定"
                 
@@ -353,12 +353,12 @@ async def 指令(ctx):
     )
     embed_strat.add_field(
         name="4️⃣ 多頭縮量回踩 (高勝率買跌)",
-        value="🟢 **為何買：** 趨勢向上的好股票跌到月線附近，但「成交量極度萎縮」。代表散戶被洗掉但主力沒跑，是安全的買點。\n🔴 **為何賣：** (嚴格防守) 買在支撐就不能破支撐！只要「收盤跌破月線」，代表防守失敗；或是反彈後又「跌破5日線」，立刻無情停損出場。",
+        value="🟢 **為何買：** 趨勢向上的好股票跌到月線附近，但「成交量極度萎縮」。代表散戶被洗掉但主力沒跑，是安全的買點。\n🔴 **為何賣：** 跌破月線為最終底線。若帶量跌破月線，代表主力真的棄守，請無情停損。",
         inline=False
     )
     embed_strat.add_field(
         name="5️⃣ 強勢創高確認 (高勝率追強)",
-        value="🟢 **為何買：** 股價帶量突破過去一個月最高點。上面完全沒有被套牢的冤魂，沒有解套賣壓，容易一飛衝天。\n🔴 **為何賣：** (嚴格防守) 突破股必須強者恆強！只要跌破「5日線」警報響起，跌破「10日線」判定為假突破誘多，立刻砍倉。",
+        value="🟢 **為何買：** 股價帶量突破過去一個月最高點。上面完全沒有被套牢的冤魂，沒有解套賣壓，容易一飛衝天。\n🔴 **為何賣：** 假突破最傷人。一旦跌破 10日線，代表主力放棄拉抬，可能是誘多騙線，立刻出場。",
         inline=False
     )
     
