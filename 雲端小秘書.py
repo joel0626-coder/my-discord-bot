@@ -147,16 +147,23 @@ intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix='!', intents=intents)
 
-# --- 每日定時推播設定 (台灣時間下午 14:00) ---
-tw_tz = timezone(timedelta(hours=8))
-target_time = time(hour=14, minute=0, tzinfo=tw_tz)
+# --- 測試用推播設定 (每 5 分鐘一次) ---
+from datetime import datetime, timezone, timedelta
 
-@tasks.loop(time=target_time)
-async def daily_report():
+@tasks.loop(minutes=5)
+async def auto_report():
     channel = bot.get_channel(PUSH_CHANNEL_ID)
     if channel:
         result = await asyncio.to_thread(run_health_check)
-        await channel.send(f"🔔 **【每日收盤總結】自動推播**\n{result}")
+        await channel.send(f"🔔 **【系統測試】5分鐘定時推播**\n{result}")
+
+@bot.event
+async def on_ready():
+    print(f"Bot 登入成功: {bot.user}")
+    if not auto_report.is_running():
+        auto_report.start()
+        print("5分鐘推播測試已啟動！")
+# ---------------------------------------------
 
 @bot.event
 async def on_ready():
