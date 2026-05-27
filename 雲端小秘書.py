@@ -12,7 +12,7 @@ import re
 from io import StringIO
 import logging
 
-# 關閉 yfinance 煩人的紅字報錯
+# 強制關閉 yfinance 煩人的紅字報錯
 logging.getLogger('yfinance').setLevel(logging.CRITICAL)
 
 TOKEN = os.environ.get('DISCORD_TOKEN')
@@ -39,7 +39,7 @@ def save_data(data):
         json.dump(data, f, indent=4, ensure_ascii=False)
 
 # =====================================================================
-# 🔍 核心 1：大數據智能選股雷達 (移植自 V5.6)
+# 🔍 核心 1：大數據智能選股雷達 (防彈升級版)
 # =====================================================================
 _TICKER_CACHE = {}
 def get_all_taiwan_tickers():
@@ -103,74 +103,77 @@ def calculate_screener_indicators(df):
     return df
 
 def run_screener_for_discord():
-    tickers_dict = get_all_taiwan_tickers()
-    # 為了避免雲端伺服器運算逾時，隨機挑選或縮小範圍。若要全掃可能需要分批。
-    # 這裡我們先轉換成 list
-    tickers = list(tickers_dict.keys())
-    
-    # Render 免費版記憶體有限，建議先限制掃描數量，例如先掃前 500 檔測試
-    # 如果確定跑得動，可以把這行拿掉
-    tickers = tickers[:500] 
-    
-    data = yf.download(tickers, period="3mo", group_by="ticker", progress=False, threads=True)
-    
-    msg_bb = ""
-    msg_macd = ""
-    msg_rsi = ""
-    
-    for ticker in tickers:
-        try:
-            df = data[ticker].dropna().copy()
-            if len(df) < 65: continue
-            df = calculate_screener_indicators(df)
+    try:
+        tickers_dict = get_all_taiwan_tickers()
+        if not tickers_dict:
+            return "⚠️ 無法取得台股代號列表，可能證交所網站連線異常。"
             
-            latest, prev1 = df.iloc[-1], df.iloc[-2]
-            close, vol, open_px = latest['Close'].item(), latest['Volume'].item(), latest['Open'].item()
-            
-            # 成交量濾網：> 5000萬
-            if close * vol * 1000 < 50000000: continue 
-            
-            name = tickers_dict[ticker]['name']
-            clean_code = ticker.replace('.TW', '').replace('.TWO', '')
-            is_uptrend = latest['SMA_60'].item() > prev1['SMA_60'].item()
-            
-            match_strat = ""
-            
-            # 策略 1: 布林壓縮突破
-            if prev1['BB_Width'].item() < 0.08 and close > latest['BB_Upper'].item() and vol > (latest['Vol_SMA_20'].item() * 2) and is_uptrend and close > open_px:
-                match_strat = "BB"
-            # 策略 2: MACD 金叉
-            elif is_uptrend and close > latest['SMA_60'].item() and (prev1['MACD'].item() < prev1['Signal_Line'].item()) and (latest['MACD'].item() > latest['Signal_Line'].item()):
-                match_strat = "MACD"
-            # 策略 3: RSI 翻揚
-            elif close < (latest['SMA_20'].item() * 0.90) and prev1['RSI_14'].item() < 30 and latest['RSI_14'].item() >= 30:
-                match_strat = "RSI"
-
-            if match_strat:
-                chips = get_finmind_chip_5d(clean_code)
-                t_buy, f_buy = chips['投信'], chips['外資']
-                chip_txt = "🔥土洋連買" if t_buy > 200 and f_buy > 500 else "🔥投信進駐" if t_buy > 150 else ""
-                
-                stock_info = f"📌 **{clean_code} {name}** | 收盤 `{round(close, 2)}` | 外資 `{f_buy}` 投信 `{t_buy}` {chip_txt}\n"
-                
-                if match_strat == "BB": msg_bb += stock_info
-                elif match_strat == "MACD": msg_macd += stock_info
-                elif match_strat == "RSI": msg_rsi += stock_info
-                
-        except: continue
-
-    final_msg = "🎯 **【盤後主力選股雷達推薦】**\n=========================\n"
-    if msg_bb: final_msg += "💥 **布林壓縮突破 (飆股動能)**\n" + msg_bb + "\n"
-    if msg_macd: final_msg += "🏄‍♂️ **均線 MACD 金叉 (順勢波段)**\n" + msg_macd + "\n"
-    if msg_rsi: final_msg += "🎣 **RSI 乖離翻揚 (危機入市)**\n" + msg_rsi + "\n"
-    
-    if not (msg_bb or msg_macd or msg_rsi):
-        final_msg += "今天大盤太無聊，沒有符合強勢條件的獵物 😴\n"
+        tickers = list(tickers_dict.keys())
+        # 限制掃描數量，避免雲端記憶體爆掉
+        tickers = tickers[:500] 
         
-    return final_msg
+        data = yf.download(tickers, period="3mo", group_by="ticker", progress=False, threads=True)
+        
+        msg_bb, msg_macd, msg_rsi = "", "", ""
+        
+        for ticker in tickers:
+            try:
+                if ticker not in data or data[ticker].empty: continue
+                    
+                df = data[ticker].dropna().copy()
+                if len(df) < 65: continue
+                
+                df = calculate_screener_indicators(df)
+                
+                latest, prev1 = df.iloc[-1], df.iloc[-2]
+                close, vol, open_px = latest['Close'].item(), latest['Volume'].item(), latest['Open'].item()
+                
+                # 成交量濾網：> 5000萬
+                if close * vol * 1000 < 50000000: continue 
+                
+                name = tickers_dict[ticker]['name']
+                clean_code = ticker.replace('.TW', '').replace('.TWO', '')
+                is_uptrend = latest['SMA_60'].item() > prev1['SMA_60'].item()
+                
+                match_strat = ""
+                if prev1['BB_Width'].item() < 0.08 and close > latest['BB_Upper'].item() and vol > (latest['Vol_SMA_20'].item() * 2) and is_uptrend and close > open_px:
+                    match_strat = "BB"
+                elif is_uptrend and close > latest['SMA_60'].item() and (prev1['MACD'].item() < prev1['Signal_Line'].item()) and (latest['MACD'].item() > latest['Signal_Line'].item()):
+                    match_strat = "MACD"
+                elif close < (latest['SMA_20'].item() * 0.90) and prev1['RSI_14'].item() < 30 and latest['RSI_14'].item() >= 30:
+                    match_strat = "RSI"
+
+                if match_strat:
+                    chips = get_finmind_chip_5d(clean_code)
+                    t_buy, f_buy = chips['投信'], chips['外資']
+                    chip_txt = "🔥土洋連買" if t_buy > 200 and f_buy > 500 else "🔥投信進駐" if t_buy > 150 else ""
+                    stock_info = f"📌 **{clean_code} {name}** | 收盤 `{round(close, 2)}` | 外資 `{f_buy}` 投信 `{t_buy}` {chip_txt}\n"
+                    
+                    if match_strat == "BB": msg_bb += stock_info
+                    elif match_strat == "MACD": msg_macd += stock_info
+                    elif match_strat == "RSI": msg_rsi += stock_info
+            except Exception: 
+                continue # 忽略單一股票錯誤
+
+        final_msg = "🎯 **【盤後主力選股雷達推薦】**\n=========================\n"
+        if msg_bb: final_msg += "💥 **布林壓縮突破 (飆股動能)**\n" + msg_bb + "\n"
+        if msg_macd: final_msg += "🏄‍♂️ **均線 MACD 金叉 (順勢波段)**\n" + msg_macd + "\n"
+        if msg_rsi: final_msg += "🎣 **RSI 乖離翻揚 (危機入市)**\n" + msg_rsi + "\n"
+        
+        if not (msg_bb or msg_macd or msg_rsi):
+            final_msg += "今天大盤太無聊，沒有符合強勢條件的獵物 😴\n"
+            
+        return final_msg
+        
+    except Exception as e:
+        # 攔截 yfinance 沒有資料導致的崩潰
+        if "No objects to concatenate" in str(e):
+            return "🎯 **【盤後主力選股雷達推薦】**\n=========================\n今天大盤太慘烈，沒有半檔符合條件的獵物 😴"
+        else:
+            return f"❌ 選股核心發生錯誤: `{str(e)}`"
 
 # =====================================================================
-# 🛡️ 核心 2：個人持股盯盤 (原本的小秘書)
+# 🛡️ 核心 2：個人持股盯盤 (小秘書)
 # =====================================================================
 def calculate_indicators(df):
     df['SMA_5'] = df['Close'].rolling(window=5).mean()
@@ -240,23 +243,19 @@ def run_health_check():
         
         macd_val, sig_val = latest['MACD'].item(), latest['Signal'].item()
         hist_val, prev_hist = latest['MACD_Hist'].item(), prev['MACD_Hist'].item()
-        
         rsi_val, prev_rsi = latest['RSI'].item(), prev['RSI'].item()
         
         latest_vol, vol_5ma = latest['Volume'].item(), latest['Vol_5MA'].item()
         is_high_vol = latest_vol > vol_5ma
-        
         macd_status = "✅ 多頭" if macd_val > sig_val else "⚠️ 空頭"
         
         custom_panel, alert_msg = "", ""
         
-        # 第一層：%數限制
-        if tp_pct and profit >= float(tp_pct):
-            alert_msg = f"💰 [獲利出場] 報酬率 {profit}% 已達停利點 (+{tp_pct}%)！"
-        elif sl_pct and profit <= -float(sl_pct):
-            alert_msg = f"🛑 [落跑停損] 報酬率 {profit}% 已達停損點 (-{sl_pct}%)！"
+        # 第一層防護：%數限制
+        if tp_pct and profit >= float(tp_pct): alert_msg = f"💰 [獲利出場] 報酬率 {profit}% 已達停利點 (+{tp_pct}%)！"
+        elif sl_pct and profit <= -float(sl_pct): alert_msg = f"🛑 [落跑停損] 報酬率 {profit}% 已達停損點 (-{sl_pct}%)！"
             
-        # 第二層：敏銳技術指標
+        # 第二層防護：技術指標
         if not alert_msg:
             if "1" in strat or "布林" in strat:
                 custom_panel = f"上軌 `{round(bb_upper, 2)}` | 5日線 `{round(ma5, 2)}` | 10日線 `{round(ma10, 2)}`"
@@ -298,7 +297,7 @@ intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix='!', intents=intents)
 
-# 🕒 盤中每半小時盯盤 (09:30~14:00)
+# 🕒 盤中盯盤 (平日 09:30~14:00 每半小時)
 @tasks.loop(minutes=30)
 async def auto_report():
     tw_tz = timezone(timedelta(hours=8))
@@ -312,18 +311,20 @@ async def auto_report():
             result = await asyncio.to_thread(run_health_check)
             await channel.send(f"🔔 **【盤中即時監控】{now.strftime('%H:%M')} 戰報**\n{result}")
 
-# 🕒 盤後每日選股推播 (下午 14:30)
+# 🕒 盤後每日選股推播 (平日下午 14:30)
 @tasks.loop(time=time(hour=14, minute=30, tzinfo=timezone(timedelta(hours=8))))
 async def daily_screener_report():
     tw_tz = timezone(timedelta(hours=8))
     now = datetime.now(tw_tz)
-    if now.weekday() > 4: return # 假日不選股
+    if now.weekday() > 4: return
     
     channel = bot.get_channel(PUSH_CHANNEL_ID)
     if channel:
         await channel.send("⏳ 雲端投顧老師正在幫您掃瞄全台股，這需要幾分鐘，請稍候...")
-        # 由於掃全台股很耗時，必須用 to_thread 避免卡死機器人
         result = await asyncio.to_thread(run_screener_for_discord)
+        
+        # 防止字數過多發送失敗
+        if len(result) > 1900: result = result[:1900] + "\n\n⚠️ ...(名單太多，字數達 Discord 上限，已省略後續清單)"
         await channel.send(result)
 
 @bot.event
@@ -333,7 +334,9 @@ async def on_ready():
     if not daily_screener_report.is_running(): daily_screener_report.start()
     print("🚀 盤中盯盤 & 盤後選股雙排程已啟動！")
 
-# --- 手動指令區 ---
+# =====================================================================
+# 手動指令區
+# =====================================================================
 @bot.command()
 async def 健檢(ctx):
     msg = await ctx.send("⏳ 正在分析短線敏銳技術指標...")
@@ -347,22 +350,16 @@ async def 健檢(ctx):
 async def 選股(ctx):
     msg = await ctx.send("⏳ 雲端投顧老師正在為您海選強勢股，請耐心等候幾分鐘...")
     try:
-        # 將超時時間拉長到 5 分鐘
+        # 將超時時間拉長至 5 分鐘
         result = await asyncio.wait_for(asyncio.to_thread(run_screener_for_discord), timeout=300.0)
-        
-        # 🛡️ 防呆：Discord 單則訊息不能超過 2000 字
+        # 防呆：Discord 單則訊息不能超過 2000 字
         if len(result) > 1900:
             result = result[:1900] + "\n\n⚠️ ...(名單太多，字數達 Discord 上限，已省略後續清單)"
-            
         await msg.edit(content=result)
-        
     except asyncio.TimeoutError:
-        await msg.edit(content="⚠️ 掃瞄逾時！向 Yahoo 財經索取 500 檔資料太久了，請稍後再試。")
+        await msg.edit(content="⚠️ 掃瞄逾時！向 Yahoo 財經索取資料太久了，請稍後再試。")
     except Exception as e:
-        # 🚨 如果發生任何程式崩潰，直接印出錯誤碼
-        error_msg = f"❌ 系統崩潰！錯誤代碼：`{str(e)}`\n請截圖給工程師（我）看！"
-        await msg.edit(content=error_msg)
-        print(f"選股功能嚴重錯誤: {e}")
+        await msg.edit(content=f"❌ 系統崩潰！錯誤代碼：`{str(e)}`")
 
 @bot.command()
 async def 新增(ctx, code: str, price: float, strat_num: str, name: str = "", tp: float = None, sl: float = None):
@@ -431,4 +428,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
