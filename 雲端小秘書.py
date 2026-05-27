@@ -345,14 +345,24 @@ async def 健檢(ctx):
 
 @bot.command()
 async def 選股(ctx):
-    """使用者手動觸發選股雷達"""
     msg = await ctx.send("⏳ 雲端投顧老師正在為您海選強勢股，請耐心等候幾分鐘...")
     try:
-        # 選股運算較久，將 timeout 設長一點 (5分鐘)
+        # 將超時時間拉長到 5 分鐘
         result = await asyncio.wait_for(asyncio.to_thread(run_screener_for_discord), timeout=300.0)
+        
+        # 🛡️ 防呆：Discord 單則訊息不能超過 2000 字
+        if len(result) > 1900:
+            result = result[:1900] + "\n\n⚠️ ...(名單太多，字數達 Discord 上限，已省略後續清單)"
+            
         await msg.edit(content=result)
+        
     except asyncio.TimeoutError:
-        await msg.edit(content="⚠️ 掃瞄逾時！雲端運算資源滿載，建議等盤後由系統自動推播。")
+        await msg.edit(content="⚠️ 掃瞄逾時！向 Yahoo 財經索取 500 檔資料太久了，請稍後再試。")
+    except Exception as e:
+        # 🚨 如果發生任何程式崩潰，直接印出錯誤碼
+        error_msg = f"❌ 系統崩潰！錯誤代碼：`{str(e)}`\n請截圖給工程師（我）看！"
+        await msg.edit(content=error_msg)
+        print(f"選股功能嚴重錯誤: {e}")
 
 @bot.command()
 async def 新增(ctx, code: str, price: float, strat_num: str, name: str = "", tp: float = None, sl: float = None):
