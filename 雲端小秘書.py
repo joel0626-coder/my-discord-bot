@@ -6,14 +6,14 @@ import json
 import os
 import asyncio
 from aiohttp import web
-from datetime import time, timezone, timedelta
+from datetime import datetime, time, timezone, timedelta
 
 TOKEN = os.environ['DISCORD_TOKEN']
 PORTFOLIO_FILE = "my_portfolio.json"
 
-# ========= 🚨 請在這裡貼上你的 Discord 頻道 ID =========
-PUSH_CHANNEL_ID = 1509058179458404495  # <--- 換成你剛剛複製的數字
-# ========================================================
+# ========= 你的專屬 Discord 頻道 ID =========
+PUSH_CHANNEL_ID = 1509058179458404495
+# ============================================
 
 STRAT_MAP = {
     "1": "1. 布林壓縮突破 (動能)",
@@ -33,7 +33,6 @@ def save_data(data):
 def calculate_indicators(df):
     """計算技術指標與成交量防呆"""
     df['SMA_20'] = df['Close'].rolling(window=20).mean()
-    # 防呆機制：5日均量
     df['Vol_5MA'] = df['Volume'].rolling(window=5).mean()
     
     std = df['Close'].rolling(window=20).std()
@@ -73,8 +72,12 @@ def run_health_check():
                     break
             except: continue
         
+        # 取得自訂股票名稱
+        stock_name = info.get('name', '')
+        display_title = f"{code} {stock_name}".strip()
+        
         if df is None or len(df) <= 30:
-            msg += f"❌ **{code}**: 抓取失敗\n\n"
+            msg += f"❌ **{display_title}**: 抓取失敗\n\n"
             continue
             
         df = calculate_indicators(df)
@@ -86,7 +89,6 @@ def run_health_check():
         strat = info.get('strategy', '無')
         profit = round(((close - cost) / cost) * 100, 2) if cost > 0 else 0
         
-        # 指標與防呆判定
         ma20 = latest['SMA_20'].item()
         bb_upper = latest['BB_Upper'].item()
         bb_lower = latest['BB_Lower'].item()
@@ -96,14 +98,13 @@ def run_health_check():
         
         latest_vol = latest['Volume'].item()
         vol_5ma = latest['Vol_5MA'].item()
-        is_high_vol = latest_vol > vol_5ma # 是否爆量
+        is_high_vol = latest_vol > vol_5ma
         
         macd_status = "✅ 多頭" if macd_val > sig_val else "⚠️ 空頭"
         
         custom_panel = ""
         alert_msg = ""
         
-        # 依據策略與成交量判斷
         if "1" in strat or "布林" in strat:
             custom_panel = f"布林: 下軌 `{round(bb_lower, 2)}` | 上軌 `{round(bb_upper, 2)}`"
             if close < bb_lower:
@@ -134,7 +135,8 @@ def run_health_check():
         if not alert_msg:
             alert_msg = "👌 狀態穩定"
             
-        msg += f"📌 **{code}**\n"
+        # 標題加入名稱
+        msg += f"📌 **{display_title}**\n"
         msg += f"   市價: `{round(close, 2)}` | 成本: `{cost}` | 報酬: `{profit}%`\n"
         msg += f"   策略: `{strat}`\n"
         msg += f"   指標: {custom_panel}\n"
@@ -147,27 +149,34 @@ intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix='!', intents=intents)
 
-# --- 測試用推播設定 (每 5 分鐘一次) ---
-from datetime import datetime, timezone, timedelta
-
-@tasks.loop(minutes=5)
+@tasks.loop(minutes=30)
 async def auto_report():
-    channel = bot.get_channel(PUSH_CHANNEL_ID)
-    if channel:
-        result = await asyncio.to_thread(run_health_check)
-        await channel.send(f"🔔 **【系統測試】5分鐘定時推播**\n{result}")
-    else:
-        print(f"❌ 嚴重錯誤：找不到頻道 ID {PUSH_CHANNEL_ID}，請檢查機器人是否有讀寫權限！")
+    tw_tz = timezone(timedelta(hours=8))
+    now = datetime.now(tw_tz)
+    
+    if now.weekday() > 4:
+        return 
+        
+    current_time = now.time()
+    start_time = time(hour=9, minute=30)
+    end_time = time(hour=14, minute=0)
+    
+    if start_time <= current_time <= end_time:
+        channel = bot.get_channel(PUSH_CHANNEL_ID)
+        if channel:
+            result = await asyncio.to_thread(run_health_check)
+            await channel.send(f"🔔 **【盤中即時監控】{now.strftime('%H:%M')} 戰報**\n{result}")
 
 @bot.event
 async def on_ready():
-    print(f"Bot 登入成功: {bot.user}")
+    print(f"✅ Bot 登入成功: {bot.user}")
     if not auto_report.is_running():
         auto_report.start()
-        print("5分鐘推播測試已啟動！")
-# ---------------------------------------------
+        print("🚀 盤中半小時推播排程已啟動！")
 
-
+# =====================================================================
+# 使用者手動指令區
+# =====================================================================
 @bot.command()
 async def 健檢(ctx):
     msg = await ctx.send("⏳ 正在分析量價關係與技術指標...")
@@ -175,23 +184,41 @@ async def 健檢(ctx):
         result = await asyncio.wait_for(asyncio.to_thread(run_health_check), timeout=30.0)
         await msg.edit(content=result)
     except asyncio.TimeoutError:
-        await msg.edit(content="⚠️ 運算逾時，請稍後再試。")
+        await msg.edit(content="⚠️ 運算逾時，Yahoo財經目前回應緩慢，請稍後再試。")
 
 @bot.command()
-async def 新增(ctx, code: str, price: float, strat_num: str):
+async def 新增(ctx, code: str, price: float, strat_num: str, name: str = ""):
+    """可選填名稱：!新增 2330 1000 1 台積電"""
     full_strat = STRAT_MAP.get(strat_num, strat_num) 
     data = load_data()
-    data[code] = {"buy_price": price, "strategy": full_strat}
+    data[code] = {
+        "buy_price": price, 
+        "strategy": full_strat,
+        "name": name  # 存入名稱
+    }
     save_data(data)
-    await ctx.send(f"✅ 已新增 **{code}**\n成本: `{price}`\n策略: `{full_strat}`")
+    display_title = f"{code} {name}".strip()
+    await ctx.send(f"✅ 已新增 **{display_title}**\n成本: `{price}`\n策略: `{full_strat}`")
+
+@bot.command()
+async def 命名(ctx, code: str, name: str):
+    """幫已存在的股票命名：!命名 2330 台積電"""
+    data = load_data()
+    if code in data:
+        data[code]['name'] = name
+        save_data(data)
+        await ctx.send(f"✅ 已將代號 **{code}** 命名為 **{name}**")
+    else:
+        await ctx.send(f"⚠️ 找不到代號 {code}，請先用 !新增 指令。")
 
 @bot.command()
 async def 刪除(ctx, code: str):
     data = load_data()
     if code in data:
+        name = data[code].get('name', '')
         del data[code]
         save_data(data)
-        await ctx.send(f"🗑️ 已從監控列表移除 **{code}**。")
+        await ctx.send(f"🗑️ 已從監控列表移除 **{code} {name}**。")
     else:
         await ctx.send(f"⚠️ 找不到代號 {code}")
 
@@ -202,10 +229,14 @@ async def 策略(ctx, code: str, strat_num: str):
     if code in data:
         data[code]['strategy'] = full_strat
         save_data(data)
-        await ctx.send(f"✅ **{code}** 策略已更新為: `{full_strat}`")
+        name = data[code].get('name', '')
+        await ctx.send(f"✅ **{code} {name}** 策略已更新為: `{full_strat}`")
     else:
         await ctx.send(f"⚠️ 找不到代號 {code}。")
 
+# =====================================================================
+# Render 雲端維持運行用的虛擬伺服器
+# =====================================================================
 async def start_web_server():
     app = web.Application()
     app.router.add_get('/', lambda r: web.Response(text="Bot is running!"))
