@@ -37,7 +37,7 @@ def save_data(data):
         json.dump(data, f, indent=4, ensure_ascii=False)
 
 # =====================================================================
-# 📚 FinMind 股票代號快取 (解決上市/上櫃瞎猜問題，極速提升健檢效能)
+# 📚 FinMind 股票代號快取
 # =====================================================================
 _TICKER_CACHE = {}
 def get_all_taiwan_tickers():
@@ -67,26 +67,36 @@ def get_all_taiwan_tickers():
     return _TICKER_CACHE
 
 # =====================================================================
-# 🛡️ 核心：個人持股極速健檢盯盤
+# 🛡️ 核心：指標計算與個股評估
 # =====================================================================
 def calculate_indicators(df):
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
+    
+    # 均線系統
     df['SMA_5'] = df['Close'].rolling(window=5).mean()
     df['SMA_10'] = df['Close'].rolling(window=10).mean()
     df['SMA_20'] = df['Close'].rolling(window=20).mean()
-    df['Vol_5MA'] = df['Volume'].rolling(window=5).mean()
+    df['SMA_60'] = df['Close'].rolling(window=60).mean()
     
+    # 量能系統
+    df['Vol_5MA'] = df['Volume'].rolling(window=5).mean()
+    df['Vol_20MA'] = df['Volume'].rolling(window=20).mean()
+    
+    # 布林通道與帶寬
     std = df['Close'].rolling(window=20).std()
     df['BB_Upper'] = df['SMA_20'] + (2 * std)
     df['BB_Lower'] = df['SMA_20'] - (2 * std)
+    df['BB_Width'] = (df['BB_Upper'] - df['BB_Lower']) / df['SMA_20']
     
+    # MACD 系統
     ema12 = df['Close'].ewm(span=12, adjust=False).mean()
     ema26 = df['Close'].ewm(span=26, adjust=False).mean()
     df['MACD'] = ema12 - ema26
     df['Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
     df['MACD_Hist'] = df['MACD'] - df['Signal']
     
+    # RSI 系統
     delta = df['Close'].diff()
     gain = delta.where(delta > 0, 0)
     loss = -delta.where(delta < 0, 0)
@@ -96,6 +106,101 @@ def calculate_indicators(df):
     df['RSI'] = 100 - (100 / (1 + rs))
     return df
 
+def run_evaluation(code):
+    """個股策略打擊區評估功能"""
+    tickers_dict = get_all_taiwan_tickers() 
+    exact_ticker = f"{code}.TW"
+    stock_name = "未知名稱"
+    
+    if f"{code}.TW" in tickers_dict: 
+        exact_ticker = f"{code}.TW"
+        stock_name = tickers_dict[exact_ticker]['name']
+    elif f"{code}.TWO" in tickers_dict: 
+        exact_ticker = f"{code}.TWO"
+        stock_name = tickers_dict[exact_ticker]['name']
+        
+    try:
+        # 下載 4 個月資料以確保季線(60MA)精準
+        df = yf.download(exact_ticker, period="4mo", progress=False)
+        if df.empty or len(df) < 65:
+            return f"⚠️ 找不到代號 {code} 的報價，或上市時間太短不足以計算季線與技術指標。"
+            
+        df = calculate_indicators(df)
+        latest = df.iloc[-1]
+        prev1 = df.iloc[-2]
+        
+        close = round(latest['Close'].item(), 2)
+        vol = latest['Volume'].item()
+        open_px = latest['Open'].item()
+        
+        ma5 = round(latest['SMA_5'].item(), 2)
+        ma20 = round(latest['SMA_20'].item(), 2)
+        ma60 = round(latest['SMA_60'].item(), 2)
+        
+        bb_upper = round(latest['BB_Upper'].item(), 2)
+        bb_width = prev1['BB_Width'].item()
+        
+        macd, sig = latest['MACD'].item(), latest['Signal'].item()
+        prev_macd, prev_sig = prev1['MACD'].item(), prev1['Signal'].item()
+        
+        rsi = latest['RSI'].item()
+        prev_rsi = prev1['RSI'].item()
+        
+        is_uptrend = latest['SMA_60'].item() > prev1['SMA_60'].item()
+        
+        # ==== 策略條件審查 (採用嚴格模式標準) ====
+        # 1. 布林突破
+        bb_cond1 = bb_width < 0.08
+        bb_cond2 = close > latest['BB_Upper'].item()
+        bb_cond3 = vol > (latest['Vol_20MA'].item() * 2)
+        bb_pass = bb_cond1 and bb_cond2 and bb_cond3 and is_uptrend and (close > open_px)
+        
+        # 2. MACD 金叉
+        macd_pass = is_uptrend and (close > ma60) and (prev_macd < prev_sig) and (macd > sig)
+        
+        # 3. RSI 反彈
+        rsi_pass = (close < ma20 * 0.95) and (prev_rsi < 30) and (rsi >= 30)
+
+        # ==== 產生評估報告 ====
+        msg = f"🔬 **【個股 X 光機評估報告】**\n"
+        msg += f"📌 **{code} {stock_name}** | 最新收盤價: `{close}`\n"
+        msg += f"📊 趨勢基準: 月線 `{ma20}` | 季線 `{ma60}`\n"
+        msg += "=========================\n"
+        
+        # 布林狀態
+        if bb_pass: msg += f"💥 **策略 1 (布林動能)**: ✅ **強勢符合！** (帶量突破壓縮上軌)\n"
+        else:
+            reason = "尚未帶量突破" if not bb_cond2 else "布林開口未極度壓縮" if not bb_cond1 else "季線非多頭排列"
+            msg += f"💥 **策略 1 (布林動能)**: ❌ 未達標 (原因: {reason})\n"
+            
+        # MACD 狀態
+        if macd_pass: msg += f"🏄‍♂️ **策略 2 (MACD趨勢)**: ✅ **波段發動！** (季線上 MACD 黃金交叉)\n"
+        else:
+            reason = "MACD 尚未金叉" if macd <= sig else "跌破季線生命線"
+            msg += f"🏄‍♂️ **策略 2 (MACD趨勢)**: ❌ 未達標 (原因: {reason})\n"
+            
+        # RSI 狀態
+        if rsi_pass: msg += f"🎣 **策略 3 (RSI逆勢)**: ✅ **危機入市！** (RSI 跌破超賣區後翻揚)\n"
+        else:
+            reason = "RSI 尚未落入極度超賣區或未翻揚" if rsi >= 30 or prev_rsi >= 30 else "未乖離月線"
+            msg += f"🎣 **策略 3 (RSI逆勢)**: ❌ 未達標 (原因: {reason})\n"
+            
+        msg += "=========================\n"
+        
+        # 教練結論
+        if bb_pass or macd_pass or rsi_pass:
+            matched_strats = []
+            if bb_pass: matched_strats.append("策略1")
+            if macd_pass: matched_strats.append("策略2")
+            if rsi_pass: matched_strats.append("策略3")
+            msg += f"💡 **【AI 教練結論】: 建議買進！**\n🔥 該股目前符合 **{', '.join(matched_strats)}** 的進場訊號。若決定試單，請用 `!新增 {code} {close} {matched_strats[0][-1]}` 加入小秘書監控，並嚴設停損！"
+        else:
+            msg += f"💡 **【AI 教練結論】: 建議觀望 👀**\n這檔股票目前技術面**並未觸發**我們的量化攻擊條件。建議先加入自選股觀察，不要急著把資金卡在不會動或趨勢轉弱的股票上！"
+            
+        return msg
+    except Exception as e:
+        return f"❌ 評估過程發生錯誤: `{e}`"
+
 def run_health_check():
     portfolio = load_data()
     if not portfolio: return "⚠️ 資料庫為空，請用 `!新增` 指令建立股票。不知道怎麼用請輸入 `!指令`"
@@ -104,7 +209,6 @@ def run_health_check():
     msg = "📊 **【雲端精準監控戰報】**\n=========================\n"
     
     for code, info in portfolio.items():
-        # ⚡ 直接從快取鎖定正確後綴，不浪費時間嘗試錯誤
         exact_ticker = f"{code}.TW"
         if f"{code}.TW" in tickers_dict: exact_ticker = f"{code}.TW"
         elif f"{code}.TWO" in tickers_dict: exact_ticker = f"{code}.TWO"
@@ -141,11 +245,9 @@ def run_health_check():
             
             custom_panel, alert_msg = "", ""
             
-            # 第一層防護：%數硬停損利
             if tp_pct and profit >= float(tp_pct): alert_msg = f"💰 [獲利出場] 報酬率 {profit}% 已達停利點 (+{tp_pct}%)！"
             elif sl_pct and profit <= -float(sl_pct): alert_msg = f"🛑 [落跑停損] 報酬率 {profit}% 已達停損點 (-{sl_pct}%)！"
                 
-            # 第二層防護：策略技術面快篩
             if not alert_msg:
                 if "1" in strat or "布林" in strat:
                     custom_panel = f"上軌 `{round(bb_upper, 2)}` | 5日線 `{round(ma5, 2)}` | 10日線 `{round(ma10, 2)}`"
@@ -184,10 +286,8 @@ intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix='!', intents=intents)
 
-# 移除 Discord 預設的陽春 Help 指令，我們自己寫一個更帥的
 bot.remove_command('help')
 
-# 🕒 平日 09:30~14:00 每半小時自動推播庫存狀況
 @tasks.loop(minutes=30)
 async def auto_report():
     tw_tz = timezone(timedelta(hours=8))
@@ -219,17 +319,31 @@ async def 指令(ctx):
     )
     
     embed.add_field(name="🔍 `!健檢`", value="極速掃描目前所有持股的技術面與風控狀態。", inline=False)
+    embed.add_field(name="🔬 `!評估 [代號]`", value="個股 X 光機！幫你鑑定這檔股票是否符合買進策略。\n*範例: `!評估 2330`*", inline=False)
     embed.add_field(name="📥 `!新增 [代號] [成本] [策略] [名稱] [停利%] [停損%]`", value="加入新持股。\n*範例: `!新增 2330 800 1 台積電 15 5`*\n(名稱與風控％數若不設定可直接留空)", inline=False)
     embed.add_field(name="🛡️ `!風控 [代號] [停利%] [停損%]`", value="更新指定股票的停損停利點。\n*範例: `!風控 2330 20 10`*", inline=False)
     embed.add_field(name="⚙️ `!策略 [代號] [策略代號]`", value="修改持股的技術面防護策略。\n*範例: `!策略 2330 2`*", inline=False)
-    embed.add_field(name="🏷️ `!命名 [代號] [名稱]`", value="幫股票加上中文名稱，方便推播辨識。\n*範例: `!命名 2330 護國神山`*", inline=False)
-    embed.add_field(name="🗑️ `!刪除 [代號]`", value="將股票從監控清單中徹底移除。\n*範例: `!刪除 2330`*", inline=False)
+    embed.add_field(name="🏷️ `!命名 [代號] [名稱]`", value="幫股票加上中文名稱。\n*範例: `!命名 2330 護國神山`*", inline=False)
+    embed.add_field(name="🗑️ `!刪除 [代號]`", value="將股票從監控清單中移除。\n*範例: `!刪除 2330`*", inline=False)
     
-    embed.add_field(name="💡 【策略代號對照表】", value="`1` : 布林壓縮突破 (動能：防守 5/10 日線)\n`2` : 雙均線+MACD (趨勢：防守 MACD 紅綠柱與死叉)\n`3` : RSI超賣反彈 (逆勢：防守高檔轉折)", inline=False)
+    embed.add_field(name="💡 【策略代號對照表】", value="`1` : 布林壓縮突破 (動能：防守 5/10 日線)\n`2` : 雙均線+MACD (趨勢：防守 MACD 綠柱與死叉)\n`3` : RSI超賣反彈 (逆勢：防守高檔轉折)", inline=False)
     
     embed.set_footer(text="🌟 提示：平日開盤期間 (09:30~14:00)，小秘書會每半小時自動推播一次戰報！")
     
     await ctx.send(embed=embed)
+
+@bot.command()
+async def 評估(ctx, code: str):
+    """個股進場條件評估"""
+    msg = await ctx.send(f"⏳ 正在調閱 `{code}` 的技術線圖，啟動量化打擊區分析...")
+    try:
+        # 單檔股票運算極快，30秒絕對足夠
+        result = await asyncio.wait_for(asyncio.to_thread(run_evaluation, code), timeout=30.0)
+        await msg.edit(content=result)
+    except asyncio.TimeoutError:
+        await msg.edit(content="⚠️ 運算逾時，Yahoo 財經連線不穩，請稍後再試。")
+    except Exception as e:
+        await msg.edit(content=f"❌ 評估過程發生系統錯誤: `{str(e)}`")
 
 @bot.command()
 async def 健檢(ctx):
