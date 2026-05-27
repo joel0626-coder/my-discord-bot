@@ -1,0 +1,30 @@
+{
+    "6147": {
+        "buy_price": 103.5,
+        "strategy": "2. 雙均線+MACD (趨勢)",
+        "highest_price": 264.0,
+        "last_price": 260.5,
+        "profit_pct": 151.69
+    },
+    "3035": {
+        "buy_price": 192.0,
+        "strategy": "2. 雙均線+MACD (趨勢)",
+        "highest_price": 206.5,
+        "last_price": 202.5,
+        "profit_pct": 5.47
+    },
+    "8069": {
+        "buy_price": 228.5,
+        "strategy": "1. 布林壓縮突破 (動能)",
+        "highest_price": 248.0,
+        "last_price": 245.0,
+        "profit_pct": 7.22
+    },
+    "6239": {
+        "buy_price": 348.0,
+        "strategy": "1. 布林壓縮突破 (動能)",
+        "highest_price": 348.0,
+        "last_price": 340.0,
+        "profit_pct": -2.3
+    }
+}
