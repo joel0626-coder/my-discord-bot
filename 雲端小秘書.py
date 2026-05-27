@@ -8,10 +8,10 @@ import asyncio
 from aiohttp import web
 from datetime import datetime, time, timezone, timedelta
 
-TOKEN = os.environ['DISCORD_TOKEN']
+TOKEN = os.environ.get('DISCORD_TOKEN')
 PORTFOLIO_FILE = "my_portfolio.json"
 
-# ========= 你的專屬 Discord 頻道 ID =========
+# ========= 🚨 你的專屬 Discord 頻道 ID =========
 PUSH_CHANNEL_ID = 1509058179458404495
 # ============================================
 
@@ -88,7 +88,6 @@ def run_health_check():
         strat = info.get('strategy', '無')
         profit = round(((close - cost) / cost) * 100, 2) if cost > 0 else 0
         
-        # 讀取自訂停損停利點
         tp_pct = info.get('tp_pct', None)
         sl_pct = info.get('sl_pct', None)
         
@@ -108,13 +107,13 @@ def run_health_check():
         custom_panel = ""
         alert_msg = ""
         
-        # ====== 🛡️ 第一層防護網：風控 % 數硬限制 (最高優先級) ======
+        # 第一層防護網：風控 % 數硬限制
         if tp_pct and profit >= float(tp_pct):
             alert_msg = f"💰 [獲利出場] 報酬率 {profit}% 已達設定停利點 (+{tp_pct}%)！"
         elif sl_pct and profit <= -float(sl_pct):
             alert_msg = f"🛑 [落跑停損] 報酬率 {profit}% 已達硬性停損點 (-{sl_pct}%)！"
             
-        # ====== 📈 第二層防護網：原本的技術指標策略 ======
+        # 第二層防護網：技術指標策略
         if not alert_msg:
             if "1" in strat or "布林" in strat:
                 custom_panel = f"布林: 下軌 `{round(bb_lower, 2)}` | 上軌 `{round(bb_upper, 2)}`"
@@ -145,7 +144,6 @@ def run_health_check():
         if not alert_msg:
             alert_msg = "👌 狀態穩定"
             
-        # 顯示風控設定文字
         tp_sl_info = f" | 停利: `+{tp_pct}%` 停損: `-{sl_pct}%`" if (tp_pct or sl_pct) else " | 風控: `未設定`"
         
         msg += f"📌 **{display_title}**\n"
@@ -161,6 +159,9 @@ intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix='!', intents=intents)
 
+# =====================================================================
+# 自動推播排程：平日 09:30 ~ 14:00，每 30 分鐘推播一次
+# =====================================================================
 @tasks.loop(minutes=30)
 async def auto_report():
     tw_tz = timezone(timedelta(hours=8))
@@ -176,7 +177,10 @@ async def auto_report():
         if channel:
             result = await asyncio.to_thread(run_health_check)
             await channel.send(f"🔔 **【盤中即時監控】{now.strftime('%H:%M')} 戰報**\n{result}")
+        else:
+            print(f"❌ 嚴重錯誤：找不到頻道 ID {PUSH_CHANNEL_ID}，請檢查。")
 
+# 整個程式只能有這「唯一」一個 on_ready
 @bot.event
 async def on_ready():
     print(f"✅ Bot 登入成功: {bot.user}")
@@ -198,11 +202,6 @@ async def 健檢(ctx):
 
 @bot.command()
 async def 新增(ctx, code: str, price: float, strat_num: str, name: str = "", tp: float = None, sl: float = None):
-    """
-    指令格式：!新增 [代號] [成本] [策略編號] [名稱] [停利%] [停損%]
-    範例一（含風控）：!新增 2330 1000 2 台積電 15 7
-    範例二（不設風控）：!新增 2317 150 1 鴻海
-    """
     full_strat = STRAT_MAP.get(strat_num, strat_num) 
     data = load_data()
     data[code] = {
@@ -219,7 +218,6 @@ async def 新增(ctx, code: str, price: float, strat_num: str, name: str = "", t
 
 @bot.command()
 async def 風控(ctx, code: str, tp: float, sl: float):
-    """幫舊股票補上或修改風控：%數不用打%號。範例：!風控 6147 20 5"""
     data = load_data()
     if code in data:
         data[code]['tp_pct'] = tp
@@ -263,6 +261,9 @@ async def 策略(ctx, code: str, strat_num: str):
     else:
         await ctx.send(f"⚠️ 找不到代號 {code}。")
 
+# =====================================================================
+# Render 雲端維持運行用的虛擬伺服器
+# =====================================================================
 async def start_web_server():
     app = web.Application()
     app.router.add_get('/', lambda r: web.Response(text="Bot is running!"))
