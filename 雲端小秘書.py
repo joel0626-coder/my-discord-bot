@@ -39,35 +39,26 @@ def save_data(data):
         json.dump(data, f, indent=4, ensure_ascii=False)
 
 # =====================================================================
-# 🔍 核心 1：大數據智能選股雷達 (FinMind API 雲端不卡關版)
+# 🔍 核心 1：大數據智能選股雷達 (具備彈性參數調整)
 # =====================================================================
 _TICKER_CACHE = {}
 def get_all_taiwan_tickers():
-    """改用 FinMind API 獲取全台股代號，完美繞過證交所針對雲端機房的防火牆阻擋"""
     global _TICKER_CACHE
     if _TICKER_CACHE: return _TICKER_CACHE
     
     tickers_dict = {}
     url = "https://api.finmindtrade.com/api/v4/data"
-    params = {
-        "dataset": "TaiwanStockInfo",
-        "token": FINMIND_TOKEN
-    }
+    params = {"dataset": "TaiwanStockInfo", "token": FINMIND_TOKEN}
     
     try:
         res = requests.get(url, params=params, timeout=15)
         data = res.json()
-        
         if data.get("status") == 200:
             for item in data.get("data", []):
                 stock_id = str(item.get("stock_id", ""))
-                
-                # 嚴格過濾：只抓 4 碼數字的「普通股」，自動剔除權證與衍生商品
                 if len(stock_id) == 4 and stock_id.isdigit():
                     stock_type = item.get("type", "")
-                    # 上櫃 (tpex) 補上 .TWO，上市 (twse) 補上 .TW
                     suffix = ".TWO" if stock_type == "tpex" else ".TW"
-                    
                     tickers_dict[f"{stock_id}{suffix}"] = {
                         "name": item.get("stock_name", ""),
                         "sector": item.get("industry_category", "")
@@ -79,7 +70,6 @@ def get_all_taiwan_tickers():
     return _TICKER_CACHE
 
 def get_finmind_chip_5d(stock_code):
-    """抓取近 5 日法人籌碼累積買賣超"""
     start_date = (datetime.now() - timedelta(days=15)).strftime("%Y-%m-%d")
     url = "https://api.finmindtrade.com/api/v4/data"
     params = {"dataset": "TaiwanStockInstitutionalInvestorsBuySell", "data_id": str(stock_code), "start_date": start_date, "token": FINMIND_TOKEN}
@@ -101,20 +91,24 @@ def get_finmind_chip_5d(stock_code):
     return {"外資": 0, "投信": 0}
 
 def calculate_screener_indicators(df):
-    """選股專用指標計算"""
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
+    df['SMA_10'] = df['Close'].rolling(window=10).mean()
     df['SMA_20'] = df['Close'].rolling(window=20).mean()
     df['SMA_60'] = df['Close'].rolling(window=60).mean()
+    df['Vol_SMA_5'] = df['Volume'].rolling(window=5).mean()
     df['Vol_SMA_20'] = df['Volume'].rolling(window=20).mean()
-    df['BB_Upper'] = df['SMA_20'] + (2 * df['Close'].rolling(window=20).std())
-    df['BB_Lower'] = df['SMA_20'] - (2 * df['Close'].rolling(window=20).std())
+    
+    std = df['Close'].rolling(window=20).std()
+    df['BB_Upper'] = df['SMA_20'] + (2 * std)
+    df['BB_Lower'] = df['SMA_20'] - (2 * std)
     df['BB_Width'] = (df['BB_Upper'] - df['BB_Lower']) / df['SMA_20']
     
     ema12 = df['Close'].ewm(span=12, adjust=False).mean()
     ema26 = df['Close'].ewm(span=26, adjust=False).mean()
     df['MACD'] = ema12 - ema26
     df['Signal_Line'] = df['MACD'].ewm(span=9, adjust=False).mean()
+    df['MACD_Hist'] = df['MACD'] - df['Signal_Line']
     
     delta = df['Close'].diff()
     gain = delta.where(delta > 0, 0)
@@ -123,17 +117,36 @@ def calculate_screener_indicators(df):
     df['RSI_14'] = 100 - (100 / (1 + rs))
     return df
 
-def run_screener_for_discord():
-    """執行大數據選股並格式化為 Discord 戰報"""
+def run_screener_for_discord(mode="嚴格"):
+    """
+    動態調整選股條件：
+    - 嚴格：高標準，大盤好時用 (預設)
+    - 放寬：降低成交量門檻、放寬布林帶寬、允許 MACD 即將金叉
+    - 極限：只要稍微轉強就抓，適合大盤死水
+    """
+    
+    # 根據模式設定參數
+    if mode == "放寬":
+        vol_amount_min = 20000000  # 成交金額 > 2000萬
+        bb_width_max = 0.12        # 允許布林開口大一點 (12%)
+        vol_multiple = 1.5         # 成交量只需大於均量 1.5 倍
+        rsi_bottom = 35            # RSI 反彈門檻提高到 35
+    elif mode == "極限":
+        vol_amount_min = 10000000  # 成交金額 > 1000萬
+        bb_width_max = 0.15        # (15%)
+        vol_multiple = 1.2         # 稍微帶量即可
+        rsi_bottom = 40            # RSI 低檔稍微勾起來就抓
+    else: # 嚴格 (預設)
+        vol_amount_min = 50000000  # 成交金額 > 5000萬
+        bb_width_max = 0.08        # 布林極度壓縮 (8%)
+        vol_multiple = 2.0         # 爆量 2 倍
+        rsi_bottom = 30            # RSI 極度超賣區反彈
+
     try:
         tickers_dict = get_all_taiwan_tickers()
-        if not tickers_dict:
-            return "⚠️ 無法取得台股代號列表，FinMind API 連線異常。"
+        if not tickers_dict: return "⚠️ 無法取得台股代號列表，FinMind API 連線異常。"
             
-        tickers = list(tickers_dict.keys())
-        # 限制掃描市值前 500 大的股票，確保 Render 免費機房不會記憶體超載崩潰
-        tickers = tickers[:500] 
-        
+        tickers = list(tickers_dict.keys())[:500] # 限制前 500 檔
         data = yf.download(tickers, period="3mo", group_by="ticker", progress=False, threads=True)
         
         msg_bb, msg_macd, msg_rsi = "", "", ""
@@ -141,31 +154,45 @@ def run_screener_for_discord():
         for ticker in tickers:
             try:
                 if ticker not in data or data[ticker].empty: continue
-                    
                 df = data[ticker].dropna().copy()
                 if len(df) < 65: continue
                 
                 df = calculate_screener_indicators(df)
-                
                 latest, prev1 = df.iloc[-1], df.iloc[-2]
                 close, vol, open_px = latest['Close'].item(), latest['Volume'].item(), latest['Open'].item()
                 
-                # 成交量濾網：單日成交金額必須大於 5000 萬
-                if close * vol * 1000 < 50000000: continue 
+                # 1. 第一關：成交金額濾網 (動態調整)
+                if close * vol * 1000 < vol_amount_min: continue 
                 
                 name = tickers_dict[ticker]['name']
                 clean_code = ticker.replace('.TW', '').replace('.TWO', '')
                 is_uptrend = latest['SMA_60'].item() > prev1['SMA_60'].item()
                 
                 match_strat = ""
-                # 策略 1: 布林壓縮突破
-                if prev1['BB_Width'].item() < 0.08 and close > latest['BB_Upper'].item() and vol > (latest['Vol_SMA_20'].item() * 2) and is_uptrend and close > open_px:
+                
+                # --- 動態策略判斷 ---
+                
+                # 策略 1: 布林壓縮突破 (動能)
+                bb_cond1 = prev1['BB_Width'].item() < bb_width_max
+                bb_cond2 = close > latest['BB_Upper'].item()
+                bb_cond3 = vol > (latest['Vol_SMA_20'].item() * vol_multiple)
+                
+                if bb_cond1 and bb_cond2 and bb_cond3 and is_uptrend and close > open_px:
                     match_strat = "BB"
-                # 策略 2: MACD 多頭金叉
-                elif is_uptrend and close > latest['SMA_60'].item() and (prev1['MACD'].item() < prev1['Signal_Line'].item()) and (latest['MACD'].item() > latest['Signal_Line'].item()):
-                    match_strat = "MACD"
-                # 策略 3: RSI 乖離翻揚
-                elif close < (latest['SMA_20'].item() * 0.90) and prev1['RSI_14'].item() < 30 and latest['RSI_14'].item() >= 30:
+                
+                # 策略 2: MACD 順勢 (趨勢)
+                # 嚴格看金叉，放寬/極限則允許紅柱縮減即將金叉
+                macd_cross = (prev1['MACD'].item() < prev1['Signal_Line'].item()) and (latest['MACD'].item() > latest['Signal_Line'].item())
+                macd_imminent = (latest['MACD'].item() < latest['Signal_Line'].item()) and (latest['MACD_Hist'].item() > prev1['MACD_Hist'].item())
+                
+                if is_uptrend and close > latest['SMA_60'].item():
+                    if mode == "嚴格" and macd_cross: match_strat = "MACD"
+                    elif mode in ["放寬", "極限"] and (macd_cross or macd_imminent): match_strat = "MACD"
+
+                # 策略 3: RSI 乖離翻揚 (逆勢)
+                # 嚴格看超賣區，放寬則看中低檔打底翻揚
+                rsi_rebound = prev1['RSI_14'].item() < rsi_bottom and latest['RSI_14'].item() >= rsi_bottom
+                if close < (latest['SMA_20'].item() * 0.95) and rsi_rebound:
                     match_strat = "RSI"
 
                 if match_strat:
@@ -178,29 +205,28 @@ def run_screener_for_discord():
                     elif match_strat == "MACD": msg_macd += stock_info
                     elif match_strat == "RSI": msg_rsi += stock_info
             except Exception: 
-                continue # 單一股票運算異常時跳過，不拖累大部隊
+                continue
 
-        final_msg = "🎯 **【盤後主力選股雷達推薦】**\n=========================\n"
-        if msg_bb: final_msg += "💥 **布林壓縮突破 (飆股動能)**\n" + msg_bb + "\n"
-        if msg_macd: final_msg += "🏄‍♂️ **均線 MACD 金叉 (順勢波段)**\n" + msg_macd + "\n"
-        if msg_rsi: final_msg += "🎣 **RSI 乖離翻揚 (危機入市)**\n" + msg_rsi + "\n"
+        final_msg = f"🎯 **【盤後選股雷達推薦】** (模式: `{mode}`)\n=========================\n"
+        if msg_bb: final_msg += "💥 **布林突破 (動能)**\n" + msg_bb + "\n"
+        if msg_macd: final_msg += "🏄‍♂️ **MACD 翻揚 (波段)**\n" + msg_macd + "\n"
+        if msg_rsi: final_msg += "🎣 **RSI 反彈 (逆勢)**\n" + msg_rsi + "\n"
         
         if not (msg_bb or msg_macd or msg_rsi):
-            final_msg += "今天大盤太無聊，沒有符合強勢條件的獵物 😴\n"
+            final_msg += f"今天大盤在 `{mode}` 模式下依然沒有符合條件的獵物 😴\n(建議可嘗試輸入 `!選股 放寬` 或 `!選股 極限`)"
             
         return final_msg
         
     except Exception as e:
         if "No objects to concatenate" in str(e):
-            return "🎯 **【盤後主力選股雷達推薦】**\n=========================\n今天大盤太慘烈，沒有半檔符合條件的強勢標的 😴"
+            return f"🎯 **【盤後選股雷達推薦】**\n=========================\n大盤極度無聊，在 `{mode}` 模式下無任何標的。"
         else:
             return f"❌ 選股核心發生錯誤: `{str(e)}`"
 
 # =====================================================================
-# 🛡️ 核心 2：個人持股高靈敏即時盯盤 (小秘書大腦)
+# 🛡️ 核心 2：個人持股盯盤
 # =====================================================================
 def calculate_indicators(df):
-    """即時健檢高靈敏指標計算"""
     df['SMA_5'] = df['Close'].rolling(window=5).mean()
     df['SMA_10'] = df['Close'].rolling(window=10).mean()
     df['SMA_20'] = df['Close'].rolling(window=20).mean()
@@ -223,15 +249,13 @@ def calculate_indicators(df):
     avg_loss = loss.ewm(alpha=1/14, adjust=False).mean()
     rs = avg_gain / avg_loss
     df['RSI'] = 100 - (100 / (1 + rs))
-    
     return df
 
 def run_health_check():
     portfolio = load_data()
     if not portfolio: return "⚠️ 資料庫為空，請用 !新增 指令建立股票。"
     
-    msg = "📊 **【雲端精準監控戰報】** (極限防護版)\n"
-    msg += "=========================\n"
+    msg = "📊 **【雲端精準監控戰報】**\n=========================\n"
     
     for code, info in portfolio.items():
         tickers = [f"{code}.TW", f"{code}.TWO", f"{code}"]
@@ -260,27 +284,21 @@ def run_health_check():
         strat = info.get('strategy', '無')
         profit = round(((close - cost) / cost) * 100, 2) if cost > 0 else 0
         
-        tp_pct = info.get('tp_pct', None)
-        sl_pct = info.get('sl_pct', None)
-        
+        tp_pct, sl_pct = info.get('tp_pct', None), info.get('sl_pct', None)
         ma5, ma10, ma20 = latest['SMA_5'].item(), latest['SMA_10'].item(), latest['SMA_20'].item()
         bb_upper, bb_lower = latest['BB_Upper'].item(), latest['BB_Lower'].item()
-        
         macd_val, sig_val = latest['MACD'].item(), latest['Signal'].item()
         hist_val, prev_hist = latest['MACD_Hist'].item(), prev['MACD_Hist'].item()
         rsi_val, prev_rsi = latest['RSI'].item(), prev['RSI'].item()
-        
         latest_vol, vol_5ma = latest['Volume'].item(), latest['Vol_5MA'].item()
         is_high_vol = latest_vol > vol_5ma
         macd_status = "✅ 多頭" if macd_val > sig_val else "⚠️ 空頭"
         
         custom_panel, alert_msg = "", ""
         
-        # 第一層防護：硬性 % 數限制
         if tp_pct and profit >= float(tp_pct): alert_msg = f"💰 [獲利出場] 報酬率 {profit}% 已達停利點 (+{tp_pct}%)！"
         elif sl_pct and profit <= -float(sl_pct): alert_msg = f"🛑 [落跑停損] 報酬率 {profit}% 已達停損點 (-{sl_pct}%)！"
             
-        # 第二層防護：敏銳版技術面濾網
         if not alert_msg:
             if "1" in strat or "布林" in strat:
                 custom_panel = f"上軌 `{round(bb_upper, 2)}` | 5日線 `{round(ma5, 2)}` | 10日線 `{round(ma10, 2)}`"
@@ -306,29 +324,22 @@ def run_health_check():
             
         tp_sl_info = f" | 停利: `+{tp_pct}%` 停損: `-{sl_pct}%`" if (tp_pct or sl_pct) else " | 風控: `未設定`"
         
-        msg += f"📌 **{display_title}**\n"
-        msg += f"   市價: `{round(close, 2)}` | 成本: `{cost}` | 報酬: `{profit}%`{tp_sl_info}\n"
-        msg += f"   策略: `{strat}`\n"
-        msg += f"   指標: {custom_panel}\n"
-        msg += f"   👉 {alert_msg}\n"
-        msg += "-------------------------\n"
+        msg += f"📌 **{display_title}**\n   市價: `{round(close, 2)}` | 成本: `{cost}` | 報酬: `{profit}%`{tp_sl_info}\n   策略: `{strat}`\n   指標: {custom_panel}\n   👉 {alert_msg}\n-------------------------\n"
         
     return msg
 
 # =====================================================================
-# 🤖 Discord 事件與定時自動推播核心
+# 🤖 Discord 機器人主程式
 # =====================================================================
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix='!', intents=intents)
 
-# 🕒 排程 1：盤中盯盤 (平日 09:30~14:00 每半小時自動推播)
 @tasks.loop(minutes=30)
 async def auto_report():
     tw_tz = timezone(timedelta(hours=8))
     now = datetime.now(tw_tz)
     if now.weekday() > 4: return 
-    
     current_time = now.time()
     if time(hour=9, minute=30) <= current_time <= time(hour=14, minute=0):
         channel = bot.get_channel(PUSH_CHANNEL_ID)
@@ -336,19 +347,15 @@ async def auto_report():
             result = await asyncio.to_thread(run_health_check)
             await channel.send(f"🔔 **【盤中即時監控】{now.strftime('%H:%M')} 戰報**\n{result}")
 
-# 🕒 排程 2：盤後每日選股推播 (平日下午 14:30 自動推播)
 @tasks.loop(time=time(hour=14, minute=30, tzinfo=timezone(timedelta(hours=8))))
 async def daily_screener_report():
     tw_tz = timezone(timedelta(hours=8))
     now = datetime.now(tw_tz)
     if now.weekday() > 4: return
-    
     channel = bot.get_channel(PUSH_CHANNEL_ID)
     if channel:
-        await channel.send("⏳ 雲端投顧老師正在幫您掃瞄全台股精選標的，請稍候...")
-        result = await asyncio.to_thread(run_screener_for_discord)
-        
-        # Discord 單則訊息長度防呆限制 (最大 2000 字)
+        await channel.send("⏳ 雲端投顧老師正在幫您掃瞄全台股精選標的(預設嚴格模式)，請稍候...")
+        result = await asyncio.to_thread(run_screener_for_discord, "嚴格")
         if len(result) > 1900: result = result[:1900] + "\n\n⚠️ ...(名單過多，字數達 Discord 上限，已省略後續清單)"
         await channel.send(result)
 
@@ -357,14 +364,10 @@ async def on_ready():
     print(f"✅ Bot 登入成功: {bot.user}")
     if not auto_report.is_running(): auto_report.start()
     if not daily_screener_report.is_running(): daily_screener_report.start()
-    print("🚀 盤中持股監控 & 盤後大數據選股雙排程已全面啟動！")
 
-# =====================================================================
-# 💬 使用者手動控制指令區
-# =====================================================================
+# --- 手動指令區 ---
 @bot.command()
 async def 健檢(ctx):
-    """手動檢查目前庫存狀況"""
     msg = await ctx.send("⏳ 正在分析短線敏銳技術指標...")
     try:
         result = await asyncio.wait_for(asyncio.to_thread(run_health_check), timeout=30.0)
@@ -373,14 +376,21 @@ async def 健檢(ctx):
         await msg.edit(content="⚠️ 運算逾時，請稍後再試。")
 
 @bot.command()
-async def 選股(ctx):
-    """隨時手動發動 V5.6 強勢選股雷達"""
-    msg = await ctx.send("⏳ 雲端投顧老師正在為您海選強勢股，請投資人耐心等候幾分鐘...")
+async def 選股(ctx, mode: str = "嚴格"):
+    """
+    輸入 !選股 ➡️ 執行預設高標準
+    輸入 !選股 放寬 ➡️ 放寬標準
+    輸入 !選股 極限 ➡️ 極度放寬標準
+    """
+    valid_modes = ["嚴格", "放寬", "極限"]
+    if mode not in valid_modes:
+        await ctx.send(f"⚠️ 模式錯誤。請輸入: `!選股 嚴格` 或 `!選股 放寬` 或 `!選股 極限`")
+        return
+        
+    msg = await ctx.send(f"⏳ 啟動 `{mode}` 模式掃瞄，請耐心等候幾分鐘...")
     try:
-        # 將超時保護拉長至 5 分鐘，給雲端主機充裕的時間下載分析
-        result = await asyncio.wait_for(asyncio.to_thread(run_screener_for_discord), timeout=300.0)
-        if len(result) > 1900:
-            result = result[:1900] + "\n\n⚠️ ...(名單過多，字數達 Discord 上限，已省略後續清單)"
+        result = await asyncio.wait_for(asyncio.to_thread(run_screener_for_discord, mode), timeout=300.0)
+        if len(result) > 1900: result = result[:1900] + "\n\n⚠️ ...(名單過多，字數達 Discord 上限，已省略後續清單)"
         await msg.edit(content=result)
     except asyncio.TimeoutError:
         await msg.edit(content="⚠️ 掃瞄逾時！雲端運算滿載中，請稍後再試。")
@@ -438,9 +448,6 @@ async def 策略(ctx, code: str, strat_num: str):
         await ctx.send(f"✅ **{code} {name}** 策略已更新為: `{full_strat}`")
     else: await ctx.send(f"⚠️ 找不到代號 {code}。")
 
-# =====================================================================
-# 🌐 Render 專用不休眠 Web 伺服器
-# =====================================================================
 async def start_web_server():
     app = web.Application()
     app.router.add_get('/', lambda r: web.Response(text="Bot is running!"))
