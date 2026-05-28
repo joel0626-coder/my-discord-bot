@@ -13,12 +13,15 @@ import logging
 # 強制關閉 yfinance 煩人的紅字報錯
 logging.getLogger('yfinance').setLevel(logging.CRITICAL)
 
+# 安全設定：Token 改為讀取環境變數 (請在代管平台或本地端設定環境變數)
 TOKEN = os.environ.get('DISCORD_TOKEN')
+# 若無設定環境變數，這裡填入原本的 Token 作為備案 (但強烈建議用環境變數)
+FINMIND_TOKEN = os.environ.get('FINMIND_TOKEN', "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJ1c2VyX2lkIjoiam9lbDA2MjYiLCJlbWFpbCI6ImpvZWwwNjI2QG1zbi5jb20iLCJ0b2tlbl92ZXJzaW9uIjowfQ.j1KeK6JfXNUX2WlEKYmdMctQV_9_xfwpzVlANplYafs")
+
 PORTFOLIO_FILE = "my_portfolio.json"
 
 # ========= 🚨 你的專屬設定 =========
 PUSH_CHANNEL_ID = 1509058179458404495
-FINMIND_TOKEN = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJ1c2VyX2lkIjoiam9lbDA2MjYiLCJlbWFpbCI6ImpvZWwwNjI2QG1zbi5jb20iLCJ0b2tlbl92ZXJzaW9uIjowfQ.j1KeK6JfXNUX2WlEKYmdMctQV_9_xfwpzVlANplYafs"
 # ============================================
 
 STRAT_MAP = {
@@ -105,6 +108,19 @@ def calculate_indicators(df):
     df['RSI'] = 100 - (100 / (1 + rs))
     return df
 
+def check_market_trend():
+    """ 檢查大盤 (台灣加權指數) 是否站上月線，作為多空環境濾網 """
+    try:
+        twii = yf.download('^TWII', period="2mo", progress=False)
+        if twii.empty: return True # 若抓不到預設允許交易
+        if isinstance(twii.columns, pd.MultiIndex):
+            twii.columns = twii.columns.get_level_values(0)
+        close = twii['Close'].iloc[-1].item()
+        ma20 = twii['Close'].rolling(window=20).mean().iloc[-1].item()
+        return close > ma20
+    except:
+        return True
+
 def run_evaluation(code):
     tickers_dict = get_all_taiwan_tickers() 
     exact_ticker = f"{code}.TW"
@@ -118,6 +134,10 @@ def run_evaluation(code):
         stock_name = tickers_dict[exact_ticker]['name']
         
     try:
+        # 1. 確認大盤環境
+        market_uptrend = check_market_trend()
+        
+        # 2. 抓取個股資料
         df = yf.download(exact_ticker, period="4mo", progress=False)
         if df.empty or len(df) < 65:
             return f"⚠️ 找不到代號 {code} 的報價，或上市時間太短不足以計算季線與技術指標。"
@@ -135,34 +155,46 @@ def run_evaluation(code):
         ma60 = round(latest['SMA_60'].item(), 2)
         
         vol_5ma = latest['Vol_5MA'].item()
-        vol_20ma = latest['Vol_20MA'].item()
         
         bb_width = prev1['BB_Width'].item()
         
         macd, sig = latest['MACD'].item(), latest['Signal'].item()
-        prev_macd, prev_sig = prev1['MACD'].item(), prev1['Signal'].item()
+        prev_macd = prev1['MACD'].item()
         rsi = latest['RSI'].item()
         prev_rsi = prev1['RSI'].item()
         max20_prev = prev1['Max_20'].item()
         
         is_uptrend = latest['SMA_60'].item() > prev1['SMA_60'].item()
         
-        # ==== 策略條件審查 ====
-        bb_pass = (bb_width < 0.08) and (close > latest['BB_Upper'].item()) and (vol > (vol_20ma * 2)) and is_uptrend and (close > open_px)
-        macd_pass = is_uptrend and (close > ma60) and (prev_macd < prev_sig) and (macd > sig)
-        rsi_pass = (close < ma20 * 0.95) and (prev_rsi < 30) and (rsi >= 30)
-        pullback_pass = is_uptrend and (close > ma60) and (low <= ma20 * 1.015) and (close > ma20) and (vol < vol_5ma)
-        breakout_pass = is_uptrend and (ma20 > ma60) and (close > max20_prev) and (vol > vol_5ma * 1.5)
+        # ==== 策略條件審查 (進場寬鬆化) ====
+        # 布林：壓縮放寬至 0.10，量能 > 5日均量 1.5 倍
+        bb_pass = (bb_width < 0.10) and (close > latest['BB_Upper'].item()) and (vol > (vol_5ma * 1.5)) and is_uptrend and (close > open_px)
+        # MACD：站上季線且 MACD > 訊號線，且紅柱/指標上升中
+        macd_pass = is_uptrend and (close > ma60) and (macd > sig) and (macd > prev_macd)
+        # RSI：網子撒大，跌破 35 後反彈向上
+        rsi_pass = (close < ma20) and (prev_rsi < 35) and (rsi >= 30) and (rsi > prev_rsi)
+        # 縮量回踩：最低價來到月線上 3% 內就算，且收盤守住月線
+        pullback_pass = is_uptrend and (close > ma60) and (low <= ma20 * 1.03) and (close >= ma20) and (vol < vol_5ma)
+        # 強勢創高：大於 5 日均量的 1.2 倍即可
+        breakout_pass = is_uptrend and (ma20 > ma60) and (close >= max20_prev) and (vol > vol_5ma * 1.2)
 
-        # ==== 產生評估報告 (統一排版) ====
+        # 🚨 大盤濾網介入：若大盤跌破月線，關閉突破與創高策略，避免假突破
+        market_warning = ""
+        if not market_uptrend:
+            bb_pass = False
+            breakout_pass = False
+            market_warning = "⚠️ **[大盤警示]** 台灣加權指數目前跌破月線，系統已強制關閉「布林突破」與「強勢創高」策略，防禦假突破風險！\n"
+
+        # ==== 產生評估報告 ====
         msg = f"🔬 **【個股 X 光機評估報告】**\n"
         msg += f"📌 **{code} {stock_name}** | 最新收盤價: `{close}`\n"
         msg += f"📊 基準: 月線 `{ma20}` | 季線 `{ma60}`\n"
         msg += "=========================\n"
+        if market_warning: msg += market_warning + "=========================\n"
         
         if bb_pass: msg += f"💥 **策略 1 (布林動能)**: ✅ 帶量突破上軌\n"
         else: msg += f"💥 **策略 1 (布林動能)**: ❌ 未達標\n"
-        if macd_pass: msg += f"🏄‍♂️ **策略 2 (MACD趨勢)**: ✅ 季線上黃金交叉\n"
+        if macd_pass: msg += f"🏄‍♂️ **策略 2 (MACD趨勢)**: ✅ MACD多頭發散中\n"
         else: msg += f"🏄‍♂️ **策略 2 (MACD趨勢)**: ❌ 未達標\n"
         if rsi_pass: msg += f"🎣 **策略 3 (RSI逆勢)**: ✅ 跌破超賣區後翻揚\n"
         else: msg += f"🎣 **策略 3 (RSI逆勢)**: ❌ 未達標\n"
@@ -181,7 +213,16 @@ def run_evaluation(code):
             if pullback_pass: matched_strats.append("策略4")
             if breakout_pass: matched_strats.append("策略5")
             
-            msg += f"💡 **【AI 教練結論】: 建議買進！**\n🔥 該股目前符合 **{', '.join(matched_strats)}** 的發動訊號。若決定進場，請用 `!新增 {code} {close} {matched_strats[0][-1]}` 加入小秘書監控，嚴設風控！"
+            # ==== 資金控管建議 (Position Sizing) ====
+            risk_pct = round(((close - ma20) / close) * 100, 2)
+            if risk_pct > 0:
+                suggested_alloc = round((2.0 / risk_pct) * 100, 1) # 單筆最大虧損 2% 換算
+                if suggested_alloc > 100: suggested_alloc = 100
+                risk_advice = f"⚖️ **資金控管建議**：目前距離月線停損約 `-{risk_pct}%`。若嚴守單筆虧損不超過總資金2%之紀律，本檔建議最多投入總資金的 **`{suggested_alloc}%`**。\n"
+            else:
+                risk_advice = f"⚖️ **資金控管建議**：目前股價已在月線之下，若進場屬於左側摸底，請極度縮小部位。\n"
+            
+            msg += f"💡 **【AI 教練結論】: 建議買進！**\n🔥 該股目前符合 **{', '.join(matched_strats)}** 的發動訊號。\n{risk_advice}若決定進場，請用 `!新增 {code} {close} {matched_strats[0][-1]}` 加入小秘書監控！"
         else:
             msg += f"💡 **【AI 教練結論】: 建議觀望 👀**\n這檔股票目前技術面**並未觸發**任何高勝率或動能攻擊條件。不要急著把資金卡在沒有表態的股票上，請多看少做！"
             
@@ -203,7 +244,11 @@ def run_health_check():
         
         try:
             df = yf.download(exact_ticker, period="3mo", progress=False)
+            # 自動補齊名稱
             stock_name = info.get('name', '')
+            if not stock_name and exact_ticker in tickers_dict:
+                stock_name = tickers_dict[exact_ticker]['name']
+                
             display_title = f"{code} {stock_name}".strip()
             
             if df.empty or len(df) <= 30:
@@ -225,56 +270,46 @@ def run_health_check():
             macd_val, sig_val = latest['MACD'].item(), latest['Signal'].item()
             hist_val, prev_hist = latest['MACD_Hist'].item(), prev['MACD_Hist'].item()
             rsi_val, prev_rsi = latest['RSI'].item(), prev['RSI'].item()
-            latest_vol, vol_5ma = latest['Volume'].item(), latest['Vol_5MA'].item()
             
-            is_high_vol = latest_vol > vol_5ma
             macd_status = "✅ 多頭" if macd_val > sig_val else "⚠️ 空頭"
             
             custom_panel, alert_msg = "", ""
             
+            # 第一層防線：自訂停損停利點
             if tp_pct and profit >= float(tp_pct): alert_msg = f"💰 [獲利出場] 報酬率 {profit}% 已達停利點 (+{tp_pct}%)！"
             elif sl_pct and profit <= -float(sl_pct): alert_msg = f"🛑 [落跑停損] 報酬率 {profit}% 已達停損點 (-{sl_pct}%)！"
                 
             if not alert_msg:
-                # 策略 1
+                # 第二層防線：策略專屬紀律 (出場嚴格化)
                 if "1" in strat or "布林" in strat:
-                    custom_panel = f"上軌 `{round(bb_upper, 2)}` | 5日線 `{round(ma5, 2)}` | 10日線 `{round(ma10, 2)}`"
-                    if close < ma10: alert_msg = "🚨 [快出場] 跌破 10 日線，動能消散！" if is_high_vol else "⚠️ [注意] 破 10 日線。"
-                    elif close < ma5: alert_msg = "⚠️ [警訊] 跌破 5 日線，短線可能熄火。"
-                    elif close > bb_upper: alert_msg = "🔥 [動能強] 帶量突破上軌！" if is_high_vol else "🤔 [觀察] 無量上漲。"
+                    custom_panel = f"上軌 `{round(bb_upper, 2)}` | 5日線 `{round(ma5, 2)}`"
+                    if close < ma5: alert_msg = "🚨 [動能熄火] 跌破 5 日強勢線，建議立刻獲利了結或停損！"
+                    elif close < bb_upper and prev['Close'].item() > prev['BB_Upper'].item(): alert_msg = "⚠️ [注意] 跌回布林通道內，動能減弱。"
                 
-                # 策略 2
                 elif "2" in strat or "MACD" in strat:
-                    custom_panel = f"MACD: `{macd_status}` | 10日線 `{round(ma10, 2)}` | 月線 `{round(ma20, 2)}`"
-                    if prev['MACD'].item() > prev['Signal'].item() and macd_val < sig_val: alert_msg = "🚨 [逃命] MACD 死叉成形！"
-                    elif hist_val > 0 and hist_val < prev_hist: alert_msg = "⚠️ [警訊] MACD 紅柱縮減，動能衰退。"
-                    elif close < ma10: alert_msg = "📉 [轉弱] 跌破 10 日線，提防下探。"
+                    custom_panel = f"MACD: `{macd_status}` | 10日線 `{round(ma10, 2)}`"
+                    if macd_val < sig_val: alert_msg = "🚨 [趨勢反轉] MACD 死叉成形，波段結束！"
+                    elif hist_val < prev_hist < df.iloc[-3]['MACD_Hist'].item(): alert_msg = "⚠️ [警訊] MACD 紅柱連續兩天縮減，隨時準備落跑。"
+                    elif close < ma10: alert_msg = "📉 [轉弱] 跌破 10 日線，建議減碼。"
                 
-                # 策略 3
                 elif "3" in strat or "RSI" in strat:
                     custom_panel = f"RSI: `{round(rsi_val, 2)}` | 5日線 `{round(ma5, 2)}`"
                     if rsi_val < prev_rsi and prev_rsi > 70: alert_msg = "🚨 [快跑] RSI 自高檔反轉向下！"
                     elif rsi_val > 75: alert_msg = "🔴 [極度超買] RSI 突破 75。"
                     elif rsi_val < 25: alert_msg = "🟢 [極度超賣] RSI 跌破 25，留意反彈。"
                 
-                # 🔥 策略 4 (更嚴格防守)
                 elif "4" in strat or "回踩" in strat:
-                    custom_panel = f"5日線 `{round(ma5, 2)}` | 月線 `{round(ma20, 2)}`"
-                    if close < ma20: alert_msg = "🚨 [防守失敗] 收盤跌破月線底線，立刻停損！"
-                    elif close < ma5: alert_msg = "⚠️ [轉弱] 反彈無力，跌破 5 日線。"
+                    custom_panel = f"月線 `{round(ma20, 2)}`"
+                    if close < ma20: alert_msg = "🚨 [防守失敗] 收盤跌破月線底線，毫無懸念立刻停損！"
                 
-                # 🔥 策略 5 (更嚴格防守)
                 elif "5" in strat or "創高" in strat:
-                    custom_panel = f"5日線 `{round(ma5, 2)}` | 10日線 `{round(ma10, 2)}`"
-                    if close < ma10: alert_msg = "🚨 [假突破] 跌破 10 日線，強勢慣性改變，無情砍倉！"
-                    elif close < ma5: alert_msg = "⚠️ [警訊] 跌破 5 日線，極強動能消散。"
+                    custom_panel = f"5日線 `{round(ma5, 2)}`"
+                    if close < ma5: alert_msg = "🚨 [假突破/轉弱] 飆股跌破 5 日線，強勢慣性改變，砍倉！"
                 
                 # 通用底線
                 else:
                     custom_panel = f"10日線 `{round(ma10, 2)}` | 月線 `{round(ma20, 2)}`"
-                    
-                if close < ma20 and not alert_msg and "3" not in strat: 
-                    alert_msg = "🚨 爆量跌破月線！" if is_high_vol else "⚠️ 縮量跌破月線"
+                    if close < ma20: alert_msg = "🚨 跌破月線底線！"
                     
             if not alert_msg: alert_msg = "👌 狀態穩定"
                 
@@ -294,6 +329,7 @@ intents.message_content = True
 bot = commands.Bot(command_prefix='!', intents=intents)
 bot.remove_command('help')
 
+# 播報時間維持不變
 @tasks.loop(minutes=30)
 async def auto_report():
     tw_tz = timezone(timedelta(hours=8))
@@ -312,11 +348,10 @@ async def on_ready():
     if not auto_report.is_running(): auto_report.start()
 
 # =====================================================================
-# 💬 使用者手動控制指令區 (新增白話文策略說明)
+# 💬 使用者手動控制指令區
 # =====================================================================
 @bot.command(aliases=['help', '幫助'])
 async def 指令(ctx):
-    # 第一張卡片：操作指令面板
     embed_cmd = discord.Embed(
         title="🤖 雲端小秘書 - 指令大全",
         description="老闆，請隨時對我下達以下指令（格式內的 `[ ]` 請記得空一格）：",
@@ -324,12 +359,11 @@ async def 指令(ctx):
     )
     embed_cmd.add_field(name="🔍 `!健檢`", value="極速掃描目前庫存所有持股的狀態。", inline=False)
     embed_cmd.add_field(name="🔬 `!評估 [代號]`", value="個股 X 光機！幫你鑑定這檔股票是否符合買進策略。\n*範例: `!評估 2330`*", inline=False)
-    embed_cmd.add_field(name="📥 `!新增 [代號] [成本] [策略] [名稱] [停利%] [停損%]`", value="將買進的股票交給小秘書監控。\n*範例: `!新增 2330 800 1 台積電 15 5`*", inline=False)
+    embed_cmd.add_field(name="📥 `!新增 [代號] [成本] [策略] [名稱] [停利%] [停損%]`", value="將股票交給小秘書監控 (名稱留空會自動抓取)。\n*範例: `!新增 2330 800 1`*", inline=False)
     embed_cmd.add_field(name="🛡️ `!風控 [代號] [停利%] [停損%]`", value="隨時更新股票的停損停利點。\n*範例: `!風控 2330 20 10`*", inline=False)
     embed_cmd.add_field(name="⚙️ `!策略 [代號] [策略代號]`", value="修改持股的防護策略。\n*範例: `!策略 2330 4`*", inline=False)
     embed_cmd.add_field(name="🗑️ `!刪除 [代號]`", value="將股票從監控清單中移除。\n*範例: `!刪除 2330`*", inline=False)
     
-    # 第二張卡片：操盤策略心法 (白話文詳解)
     embed_strat = discord.Embed(
         title="📖 【五大量化策略】操盤心法與進出場邏輯",
         description="系統會根據您選擇的策略，自動執行對應的防守底線：",
@@ -338,27 +372,27 @@ async def 指令(ctx):
     
     embed_strat.add_field(
         name="1️⃣ 布林壓縮突破 (抓動能飆股)",
-        value="🟢 **為何買：** 股票盤整很久(布林帶極度壓縮)，突然爆大量衝破天花板(上軌)。代表主力準備發車！\n🔴 **為何賣：** 飆車最怕熄火。只要跌破 10日線(動能消散)，小秘書會立刻叫你落袋為安。",
+        value="🟢 **為何買：** 股票盤整很久，突然帶量衝破上軌。代表主力準備發車！\n🔴 **為何賣(極度嚴格)：** 飆車最怕熄火。只要跌破「5日線」，小秘書會立刻叫你落袋為安。",
         inline=False
     )
     embed_strat.add_field(
         name="2️⃣ 雙均線 + MACD (抓波段趨勢)",
-        value="🟢 **為何買：** 長線趨勢向上(站穩季線)，且MACD「剛剛」黃金交叉。代表短線整理結束，新一波漲勢啟動。\n🔴 **為何賣：** 波段結束。當MACD紅柱縮減(沒力了)或跌破 10日線，代表這波漲完，準備撤退。",
+        value="🟢 **為何買：** 長線趨勢向上，且MACD翻揚。代表短線整理結束，新一波漲勢啟動。\n🔴 **為何賣：** 當 MACD 紅柱連續縮減，或是死叉跌破「10日線」，代表這波漲完準備撤退。",
         inline=False
     )
     embed_strat.add_field(
         name="3️⃣ RSI 超賣反彈 (抓危機入市)",
-        value="🟢 **為何買：** 股價跌太深(乖離月線)，散戶極度恐慌(RSI破30)。當RSI重新勾起，代表殺盤力道竭盡，進場搶報復性反彈。\n🔴 **為何賣：** 搶反彈有賺就跑。只要RSI衝上 70(極度超買)，或是反彈觸碰月線壓力區，隨時停利。",
+        value="🟢 **為何買：** 股價跌太深，散戶極度恐慌。當RSI重新勾起，代表殺盤竭盡，進場搶反彈。\n🔴 **為何賣：** 搶反彈有賺就跑。RSI自高檔跌落或衝上極度超買區，隨時停利。",
         inline=False
     )
     embed_strat.add_field(
         name="4️⃣ 多頭縮量回踩 (高勝率買跌)",
-        value="🟢 **為何買：** 趨勢向上的好股票跌到月線附近，但「成交量極度萎縮」。代表散戶被洗掉但主力沒跑，是安全的買點。\n🔴 **為何賣：** (嚴格防守) 買在支撐就不能破支撐！只要「收盤跌破月線」，代表防守失敗；或是反彈後又「跌破5日線」，立刻無情停損出場。",
+        value="🟢 **為何買：** 好股票跌到月線附近，但成交量極度萎縮。代表散戶被洗掉但主力沒跑。\n🔴 **為何賣(極度嚴格)：** 買在支撐就不能破支撐！只要「收盤跌破月線」，代表防守失敗立刻無情停損。",
         inline=False
     )
     embed_strat.add_field(
         name="5️⃣ 強勢創高確認 (高勝率追強)",
-        value="🟢 **為何買：** 股價帶量突破過去一個月最高點。上面完全沒有被套牢的冤魂，沒有解套賣壓，容易一飛衝天。\n🔴 **為何賣：** (嚴格防守) 突破股必須強者恆強！只要跌破「5日線」警報響起，跌破「10日線」判定為假突破誘多，立刻砍倉。",
+        value="🟢 **為何買：** 股價帶量突破過去一個月最高點。上面沒有套牢賣壓，容易一飛衝天。\n🔴 **為何賣(極度嚴格)：** 突破股必須強者恆強！只要跌破「5日線」判定為強勢慣性改變，砍倉。",
         inline=False
     )
     
@@ -367,7 +401,7 @@ async def 指令(ctx):
 
 @bot.command()
 async def 評估(ctx, code: str):
-    msg = await ctx.send(f"⏳ 正在調閱 `{code}` 的技術線圖，啟動量化打擊區分析...")
+    msg = await ctx.send(f"⏳ 正在調閱 `{code}` 的技術線圖，啟動量化打擊區與大盤濾網分析...")
     try:
         result = await asyncio.wait_for(asyncio.to_thread(run_evaluation, code), timeout=30.0)
         await msg.edit(content=result)
@@ -386,12 +420,22 @@ async def 健檢(ctx):
     except asyncio.TimeoutError:
         await msg.edit(content="⚠️ 運算逾時，Yahoo 財經連線不穩，請稍後再試。")
 
+# 修正名稱自動抓取機制
 @bot.command()
 async def 新增(ctx, code: str, price: float, strat_num: str, name: str = "", tp: float = None, sl: float = None):
+    if not name:
+        tickers_dict = get_all_taiwan_tickers()
+        exact_ticker = f"{code}.TW" if f"{code}.TW" in tickers_dict else f"{code}.TWO"
+        if exact_ticker in tickers_dict:
+            name = tickers_dict[exact_ticker]['name']
+        else:
+            name = "未知名稱"
+            
     full_strat = STRAT_MAP.get(strat_num, strat_num) 
     data = load_data()
     data[code] = {"buy_price": price, "strategy": full_strat, "name": name, "tp_pct": tp, "sl_pct": sl}
     save_data(data)
+    
     display_title = f"{code} {name}".strip()
     风控文 = f" | 停利: +{tp}% 停損: -{sl}%" if (tp or sl) else " | 未設定風控"
     await ctx.send(f"✅ 已新增 **{display_title}**\n成本: `{price}`\n策略: `{full_strat}`{风控文}")
