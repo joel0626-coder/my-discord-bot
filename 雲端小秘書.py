@@ -2,7 +2,7 @@ import discord
 from discord.ext import commands, tasks
 import yfinance as yf
 import pandas as pd
-import numpy as np # 💡 法人量化模型必需模組
+import numpy as np
 import json
 import os
 import asyncio
@@ -30,11 +30,11 @@ PUSH_CHANNEL_ID = 1509058179458404495
 # ============================================
 
 STRAT_MAP = {
-    "1": "1. 布林壓縮突破 (動能)",
-    "2": "2. 雙均線+MACD (趨勢)",
-    "3": "3. RSI超賣反彈 (逆勢)",
-    "4": "4. 多頭縮量回踩 (高勝率防守)",
-    "5": "5. 強勢創高確認 (高勝率攻擊)"
+    "1": "1. 布林壓縮突破 (動能攻擊)",
+    "2": "2. 雙均線+MACD (趨勢波段)",
+    "3": "3. RSI超賣反彈 (極端逆勢)",
+    "4": "4. 多頭縮量回踩 (窒息量防守)",
+    "5": "5. 強勢創高確認 (爆量攻擊)"
 }
 
 # =====================================================================
@@ -99,7 +99,7 @@ def get_all_taiwan_tickers():
     return _TICKER_CACHE
 
 # =====================================================================
-# 🛡️ 核心：指標計算、環境濾網與戰敗分析 (升級版)
+# 🛡️ 核心：指標計算與環境濾網
 # =====================================================================
 def calculate_indicators(df):
     if isinstance(df.columns, pd.MultiIndex):
@@ -137,7 +137,7 @@ def calculate_indicators(df):
     rs = avg_gain / avg_loss
     df['RSI'] = 100 - (100 / (1 + rs))
     
-    # ATR 真實波動幅度 (用於法人動態停損)
+    # ATR 真實波動幅度
     high_low = df['High'] - df['Low']
     high_close = np.abs(df['High'] - df['Close'].shift())
     low_close = np.abs(df['Low'] - df['Close'].shift())
@@ -145,7 +145,7 @@ def calculate_indicators(df):
     true_range = np.max(ranges, axis=1)
     df['ATR_14'] = true_range.rolling(14).mean()
     
-    # 多頭排列與均線糾結判定
+    # 多頭排列判定
     df['Bull_Aligned'] = (df['SMA_5'] > df['SMA_10']) & (df['SMA_10'] > df['SMA_20']) & (df['SMA_20'] > df['SMA_60'])
     
     return df
@@ -203,7 +203,7 @@ def run_loss_analysis(code, name, buy_price, sell_price, strat):
         return f"分析失敗 ({e})"
 
 # =====================================================================
-# 📚 升級版：法人級深度健檢
+# 📚 深度健檢 (包含量能結構文字判定)
 # =====================================================================
 def run_deep_analysis(code):
     tickers_dict = get_all_taiwan_tickers() 
@@ -241,6 +241,11 @@ def run_deep_analysis(code):
         sig = round(latest['Signal'].item(), 2)
         atr = latest['ATR_14'].item()
         
+        # 提取量能數據
+        vol = latest['Volume'].item()
+        vol_5ma = latest['Vol_5MA'].item()
+        vol_lots = int(vol / 1000)
+        
         # 估值狀態判定
         val_status = ""
         if pe_ratio != 'N/A':
@@ -275,7 +280,6 @@ def run_deep_analysis(code):
                 t_str = f"買超 {trust_net_lots}" if trust_net_lots >= 0 else f"賣超 {abs(trust_net_lots)}"
                 chip_status = f"近 5 日外資合計: `{f_str}` 張\n近 5 日投信合計: `{t_str}` 張\n"
                 
-                # 強化籌碼過濾：排除百張以下的無意義雜訊
                 if abs(foreign_net_lots) < 200 and abs(trust_net_lots) < 200:
                     chip_status += "    結論：法人進出量極小，視為散單或被動型基金微調，無明顯方向。"
                 elif foreign_net_lots > 0 and trust_net_lots > 0: chip_status += "    結論：法人同步看好，籌碼集中度極佳。"
@@ -292,7 +296,13 @@ def run_deep_analysis(code):
         elif close < ma20 and close < ma60: trend_msg = f"股價跌破生命線，處於空頭弱勢格局，易跌難漲。"
         else: trend_msg = f"目前股價處於月線與季線之間，屬於震盪整理、方向未明階段。"
         
-        # 防禦點位改用 ATR 真實波動計算
+        # 量能狀態判定
+        if vol > vol_5ma * 2.0: vol_msg = f"當日 `{vol_lots:,}` 張，達 5 日均量 2 倍以上，屬「**爆量/攻擊量**」格局。"
+        elif vol > vol_5ma * 1.5: vol_msg = f"當日 `{vol_lots:,}` 張，達 5 日均量 1.5 倍，屬「**攻擊推升量**」。"
+        elif vol < vol_5ma * 0.7: vol_msg = f"當日 `{vol_lots:,}` 張，低於 5 日均量 70%，屬「**極度量縮/窒息量**」冷卻狀態。"
+        else: vol_msg = f"當日 `{vol_lots:,}` 張，與近期均量相近，動能維持常態。"
+
+        # 防禦點位 (ATR)
         def1_low, def1_high = round(ma10 - (atr * 0.5), 1), round(ma10 + (atr * 0.5), 1)
         def2_low, def2_high = round(ma20 - (atr * 0.5), 1), round(ma20 + (atr * 0.5), 1)
 
@@ -304,7 +314,8 @@ def run_deep_analysis(code):
         msg += "**一、產業定錨與估值 (Fundamentals & Valuation)**\n"
         msg += f"• **產業定位**：【{sector}】\n"
         msg += f"• **估值評級**：目前本益比 `{pe_ratio}` 倍。{val_status}\n\n"
-        msg += "**二、技術動能狀態 (Momentum & Trend)**\n"
+        msg += "**二、技術與量價動能 (Momentum & Volume)**\n"
+        msg += f"• **量能結構**：{vol_msg}\n"
         msg += f"• **趨勢狀態**：{trend_msg}\n"
         msg += f"• **RSI (14日)**: `{rsi}` (動能狀態)\n"
         msg += f"• **MACD 狀態**: `{macd}` vs `{sig}` (快慢線)\n\n"
@@ -313,7 +324,7 @@ def run_deep_analysis(code):
         msg += f"• **近期短壓 (布林上軌)**: 約 `{bb_upper}` 元附近\n"
         msg += f"• **第一防線 (10日動能支撐)**: `{def1_low} ~ {def1_high}` 元\n"
         msg += f"• **第二防線 (月線波段大本營)**: `{def2_low} ~ {def2_high}` 元\n"
-        msg += "    *操作紀律：買黑不買紅，切勿在乖離過大時追高，建議於防線量縮時試單。*\n\n"
+        msg += "    *操作紀律：買黑不買紅，切勿在乖離過大時追高，建議於防線「量縮」時試單。*\n\n"
         msg += "**四、法人籌碼結構 (Chip Analysis)**\n"
         msg += f"{chip_status}\n\n"
         msg += "**五、總結與教練對策 (Manager's Plan)**\n"
@@ -327,7 +338,7 @@ def run_deep_analysis(code):
         return f"❌ 分析過程發生錯誤: `{e}`"
 
 # =====================================================================
-# 🔬 升級版：量化評估與資金管控
+# 🔬 嚴格量化評估與資金管控 (寫入窒息量與爆量濾網)
 # =====================================================================
 def run_evaluation(code):
     tickers_dict = get_all_taiwan_tickers() 
@@ -354,7 +365,6 @@ def run_evaluation(code):
         low = round(latest['Low'].item(), 2)
         vol = latest['Volume'].item()
         vol_5ma = latest['Vol_5MA'].item()
-        vol_20ma = latest['Vol_20MA'].item()
         
         ma20 = round(latest['SMA_20'].item(), 2)
         atr = latest['ATR_14'].item()
@@ -365,12 +375,21 @@ def run_evaluation(code):
         rsi, prev_rsi = latest['RSI'].item(), prev1['RSI'].item()
         max20_prev = prev1['Max_20'].item()
         
-        # 量化策略條件全面升級 (加入均線糾結與相對成交量)
-        bb_pass = (bb_width < 0.12) and (close > latest['BB_Upper'].item()) and (vol > (vol_20ma * 2.0)) and bull_aligned
+        # 🆕 量能嚴格濾網 (Shrink & Surge)
+        vol_shrink_pass = vol < (vol_5ma * 0.7)  # 窒息量：低於5日均量70%
+        vol_surge_pass = vol > (vol_5ma * 1.5)   # 攻擊量：大於5日均量150%
+        
+        # 量化策略條件全面升級
+        # 策略1: 布林壓縮突破 (必須伴隨攻擊量)
+        bb_pass = (bb_width < 0.12) and (close > latest['BB_Upper'].item()) and vol_surge_pass and bull_aligned
+        # 策略2: MACD多方發動
         macd_pass = bull_aligned and (macd > sig) and (prev1['MACD'].item() <= prev1['Signal'].item())
+        # 策略3: 乖離過大極端超賣
         rsi_pass = (close < ma20) and (prev_rsi < 30) and (rsi >= 30)
-        pullback_pass = bull_aligned and (low <= ma20 + (atr*0.5)) and (close >= ma20) and (vol < vol_20ma)
-        breakout_pass = bull_aligned and (close >= max20_prev) and (vol > vol_5ma * 1.5)
+        # 策略4: 多頭縮量回踩 (強制要求必須是窒息量)
+        pullback_pass = bull_aligned and (low <= ma20 + (atr*0.5)) and (close >= ma20) and vol_shrink_pass
+        # 策略5: 帶量創波段高 (必須伴隨攻擊量)
+        breakout_pass = bull_aligned and (close >= max20_prev) and vol_surge_pass
 
         market_warning = ""
         if not market_uptrend:
@@ -379,14 +398,15 @@ def run_evaluation(code):
 
         msg = f"🔬 **【AI 量化打擊區 X 光機】**\n"
         msg += f"📌 **{code} {stock_name}** | 收盤價: `{close}` | 日均波動 ATR: `{round(atr, 2)}`\n"
+        msg += f"📊 5日均量基準: `{int(vol_5ma/1000):,}` 張 | 當日成交: `{int(vol/1000):,}` 張\n"
         msg += "=========================\n"
         if market_warning: msg += market_warning + "=========================\n"
         
-        msg += f"💥 **策略 1 (布林壓縮突破)**: {'✅ 觸發' if bb_pass else '❌ 未達標'}\n"
+        msg += f"💥 **策略 1 (布林帶量突破)**: {'✅ 觸發 [大於均量1.5倍]' if bb_pass else '❌ 未達標'}\n"
         msg += f"🏄‍♂️ **策略 2 (MACD多方發動)**: {'✅ 觸發' if macd_pass else '❌ 未達標'}\n"
         msg += f"🎣 **策略 3 (極端超賣反彈)**: {'✅ 觸發' if rsi_pass else '❌ 未達標'}\n"
-        msg += f"🛡️ **策略 4 (多頭縮量回踩)**: {'✅ 觸發 [高勝率]' if pullback_pass else '❌ 未達標'}\n"
-        msg += f"🚀 **策略 5 (帶量創波段高)**: {'✅ 觸發 [高勝率]' if breakout_pass else '❌ 未達標'}\n"
+        msg += f"🛡️ **策略 4 (多頭縮量回踩)**: {'✅ 觸發 [低於均量70%]' if pullback_pass else '❌ 未達標 (需等窒息量)'}\n"
+        msg += f"🚀 **策略 5 (帶量創波段高)**: {'✅ 觸發 [大於均量1.5倍]' if breakout_pass else '❌ 未達標'}\n"
         msg += "=========================\n"
         
         matched_strats = []
@@ -496,11 +516,15 @@ def run_health_check():
             max20_prev = prev['Max_20'].item()
             is_uptrend = latest['SMA_60'].item() > prev['SMA_60'].item()
             
-            bb_pass = (bb_width < 0.10) and (close > bb_upper) and (vol > (vol_5ma * 1.5)) and is_uptrend and (close > open_px)
+            # 庫存健檢也套用嚴格量能判定
+            vol_surge_pass = vol > (vol_5ma * 1.5)
+            vol_shrink_pass = vol < (vol_5ma * 0.7)
+            
+            bb_pass = (bb_width < 0.10) and (close > bb_upper) and vol_surge_pass and is_uptrend and (close > open_px)
             macd_pass = is_uptrend and (close > ma60) and (macd_val > sig_val) and (macd_val > prev_macd)
             rsi_pass = (close < ma20) and (prev_rsi < 35) and (rsi_val >= 30) and (rsi_val > prev_rsi)
-            pullback_pass = is_uptrend and (close > ma60) and (low <= ma20 * 1.03) and (close >= ma20) and (vol < vol_5ma)
-            breakout_pass = is_uptrend and (ma20 > ma60) and (close >= max20_prev) and (vol > vol_5ma * 1.2)
+            pullback_pass = is_uptrend and (close > ma60) and (low <= ma20 * 1.03) and (close >= ma20) and vol_shrink_pass
+            breakout_pass = is_uptrend and (ma20 > ma60) and (close >= max20_prev) and vol_surge_pass
             
             if not market_uptrend:
                 bb_pass = False
@@ -580,7 +604,7 @@ def run_health_check():
         except Exception as e:
             stock_messages.append(f"❌ **{code} {info.get('name', '')}**: 運算錯誤 ({e})\n\n")
 
-    header_msg = "📊 **【雲端精準監控戰報】(V10 法人升級版)**\n"
+    header_msg = "📊 **【雲端精準監控戰報】(V11 終極量化升級版)**\n"
     if not market_uptrend:
         header_msg += "⚠️ **[大盤警示]** 加權指數跌破月線，系統已自動關閉攻擊判定！\n"
     header_msg += "=========================\n"
@@ -671,9 +695,9 @@ async def 指令(ctx):
         color=0x2ECC71
     )
     embed_cmd.add_field(name="🏦 `!本金 [金額]`", value="設定初始帳戶總資金，解鎖法人級儀表板。", inline=False)
-    embed_cmd.add_field(name="📦 `!庫存`", value="【全新】秒速清點精簡版庫存與帳面賺賠明細。", inline=False)
+    embed_cmd.add_field(name="📦 `!庫存`", value="秒速清點精簡版庫存與帳面賺賠明細。", inline=False)
     embed_cmd.add_field(name="🔍 `!健檢`", value="360度全方位掃描目前庫存狀態與操盤教練對策。", inline=False)
-    embed_cmd.add_field(name="🔬 `!評估 [代號]`", value="個股攻擊雷達！自動依據本金換算建議買進股數。", inline=False)
+    embed_cmd.add_field(name="🔬 `!評估 [代號]`", value="個股攻擊雷達！套用嚴格窒息量/攻擊量濾網。", inline=False)
     embed_cmd.add_field(name="📑 `!分析 [代號]`", value="法人級個股深度研究報告 (含外資投信籌碼)。", inline=False)
     embed_cmd.add_field(name="📥 `!新增 [代號] [均價] [股數] [策略] [停利%] [停損%]`", value="將股票交給小秘書監控 (名稱全自動抓取)。", inline=False)
     embed_cmd.add_field(name="✏️ `!部位 [代號] [新均價] [新總股數]`", value="手動校正持股的成本價與總股數。", inline=False)
