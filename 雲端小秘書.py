@@ -424,11 +424,26 @@ async def auto_report():
     now = datetime.now(tw_tz)
     if now.weekday() > 4: return 
     current_time = now.time()
+    
     if time(hour=9, minute=30) <= current_time <= time(hour=14, minute=0):
         channel = bot.get_channel(PUSH_CHANNEL_ID)
         if channel:
             result = await asyncio.to_thread(run_health_check)
-            await channel.send(f"🔔 **【盤中即時監控】{now.strftime('%H:%M')} 戰報**\n{result}")
+            full_msg = f"🔔 **【盤中即時監控】{now.strftime('%H:%M')} 戰報**\n{result}"
+            
+            chunks = []
+            current_chunk = ""
+            for line in full_msg.split('\n'):
+                if len(current_chunk) + len(line) + 1 > 1900:
+                    chunks.append(current_chunk)
+                    current_chunk = line + "\n"
+                else:
+                    current_chunk += line + "\n"
+            if current_chunk:
+                chunks.append(current_chunk)
+                
+            for chunk in chunks:
+                await channel.send(chunk)
 
 @bot.event
 async def on_ready():
@@ -502,14 +517,33 @@ async def 健檢(ctx):
     msg = await ctx.send("⏳ 正在啟動 360 度全方位庫存診斷與資金部位結算...")
     try:
         result = await asyncio.wait_for(asyncio.to_thread(run_health_check), timeout=120.0)
-        if len(result) > 1900: result = result[:1900] + "\n\n⚠️ ...(庫存過多，字數達 Discord 上限)"
-        await msg.edit(content=result)
+        
+        if len(result) <= 1900:
+            await msg.edit(content=result)
+        else:
+            await msg.edit(content="⏳ 報告長度達到上限，小秘書正在為您分頁傳輸...")
+            chunks = []
+            current_chunk = ""
+            for line in result.split('\n'):
+                if len(current_chunk) + len(line) + 1 > 1900:
+                    chunks.append(current_chunk)
+                    current_chunk = line + "\n"
+                else:
+                    current_chunk += line + "\n"
+            if current_chunk:
+                chunks.append(current_chunk)
+                
+            for i, chunk in enumerate(chunks):
+                if i == 0:
+                    await msg.edit(content=chunk)
+                else:
+                    await ctx.send(chunk)
+                    
     except asyncio.TimeoutError:
         await msg.edit(content="⚠️ 運算逾時，Yahoo 財經連線不穩，請稍後再試。")
 
 @bot.command()
 async def 新增(ctx, code: str, price: float, shares: int, strat_num: str, tp: float = None, sl: float = None):
-    # 💡 強制全自動抓取名稱，不再需要使用者手動輸入
     tickers_dict = get_all_taiwan_tickers()
     exact_ticker = f"{code}.TW" if f"{code}.TW" in tickers_dict else f"{code}.TWO"
     if exact_ticker in tickers_dict: 
