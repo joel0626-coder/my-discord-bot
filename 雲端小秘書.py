@@ -13,7 +13,9 @@ import logging
 # 強制關閉 yfinance 煩人的紅字報錯
 logging.getLogger('yfinance').setLevel(logging.CRITICAL)
 
-# 系統與金鑰設定
+# =====================================================================
+# 🔑 系統與金鑰設定
+# =====================================================================
 TOKEN = os.environ.get('DISCORD_TOKEN')
 FINMIND_TOKEN = os.environ.get('FINMIND_TOKEN', "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJ1c2VyX2lkIjoiam9lbDA2MjYiLCJlbWFpbCI6ImpvZWwwNjI2QG1zbi5jb20iLCJ0b2tlbl92ZXJzaW9uIjowfQ.j1KeK6JfXNUX2WlEKYmdMctQV_9_xfwpzVlANplYafs")
 
@@ -164,10 +166,10 @@ def run_loss_analysis(code, name, buy_price, sell_price, strat):
         if rsi < 40:
             reasons.append("🧊 **人氣退潮**：RSI 轉弱，陷入無量陰跌。")
         if buy_price > ma10 and sell_price < ma10 and not market_uptrend:
-            reasons.append("💡 **AI 教練碎碎念**：大盤不佳時追高強勢股容易被洗，下次請等「縮量回踩」。")
+            reasons.append("💡 **AI 教練碎碎念**：大盤不佳時追高強勢股容易被洗，下次請耐心等待「縮量回踩」。")
             
         if not reasons:
-            reasons.append("💡 **AI 教練碎碎念**：技術面無明顯嚴重破壞。此筆可能為洗盤或個人資金調度。")
+            reasons.append("💡 **AI 教練碎碎念**：技術面無明顯嚴重破壞。此筆可能為主力洗盤或個人資金調度。")
             
         return "\n".join(reasons)
     except Exception as e:
@@ -285,8 +287,8 @@ def run_health_check():
         try:
             df = yf.download(exact_ticker, period="3mo", progress=False)
             stock_name = info.get('name', '')
-            if not stock_name and exact_ticker in tickers_dict:
-                stock_name = tickers_dict[exact_ticker]['name']
+            if not stock_name or stock_name == "未知名稱":
+                if exact_ticker in tickers_dict: stock_name = tickers_dict[exact_ticker]['name']
                 
             display_title = f"{code} {stock_name}".strip()
             
@@ -303,9 +305,8 @@ def run_health_check():
             open_px = latest['Open'].item()
             vol = latest['Volume'].item()
             
-            # 💡 資金部位與損益計算 (核心升級)
             cost = info.get('buy_price', 0)
-            shares = info.get('shares', 1000) # 舊資料防呆，預設 1000 股
+            shares = info.get('shares', 1000)
             total_cost = int(round(cost * shares))
             current_value = int(round(close * shares))
             profit_amount = current_value - total_cost
@@ -399,7 +400,6 @@ def run_health_check():
             tp_sl_info = f" | 停利: `+{tp_pct}%` 停損: `-{sl_pct}%`" if (tp_pct or sl_pct) else " | 風控: `未設定`"
             pnl_amt_str = f"+{profit_amount:,}" if profit_amount >= 0 else f"{profit_amount:,}"
             
-            # 💡 精美的部位控管顯示
             msg += f"📌 **{display_title}**\n"
             msg += f"   市價: `{close}` | 均價: `{cost}` | 股數: `{shares:,}` 股\n"
             msg += f"   總成本: `{total_cost:,}` | 總市值: `{current_value:,}`\n"
@@ -440,7 +440,6 @@ async def on_ready():
 # =====================================================================
 @bot.command(aliases=['help', '幫助'])
 async def 指令(ctx):
-    # 第一張卡片：操作指令面板
     embed_cmd = discord.Embed(
         title="🤖 雲端小秘書 - 指令大全",
         description="老闆，請隨時對我下達以下指令（格式內的 `[ ]` 請記得空一格）：",
@@ -448,15 +447,15 @@ async def 指令(ctx):
     )
     embed_cmd.add_field(name="🔍 `!健檢`", value="360度全方位掃描目前庫存狀態與帳面金額。", inline=False)
     embed_cmd.add_field(name="🔬 `!評估 [代號]`", value="個股 X 光機！幫你鑑定這檔股票是否符合買進策略。", inline=False)
-    embed_cmd.add_field(name="📥 `!新增 [代號] [均價] [股數] [策略] [名稱] [停利%] [停損%]`", value="將股票交給小秘書監控。\n*範例: `!新增 2330 800 2000 1`*", inline=False)
+    embed_cmd.add_field(name="📥 `!新增 [代號] [均價] [股數] [策略] [停利%] [停損%]`", value="將股票交給小秘書監控 (名稱全自動抓取)。\n*範例: `!新增 2330 800 2000 1` (買2張)*", inline=False)
     embed_cmd.add_field(name="✏️ `!部位 [代號] [新均價] [新總股數]`", value="修正持股的成本價與總股數。\n*範例: `!部位 2330 820 3000`*", inline=False)
     embed_cmd.add_field(name="🛡️ `!風控 [代號] [停利%] [停損%]`", value="隨時更新股票的停損停利點。", inline=False)
     embed_cmd.add_field(name="⚙️ `!策略 [代號] [策略代號]`", value="修改持股的防護策略。", inline=False)
+    embed_cmd.add_field(name="🏷️ `!命名 [代號] [名稱]`", value="手動為股票正名 (若系統未抓到時使用)。", inline=False)
     embed_cmd.add_field(name="🗑️ `!刪除 [代號]`", value="將股票從監控清單中移除。", inline=False)
-    embed_cmd.add_field(name="💸 `!賣出 [代號] [賣出價] [賣出股數]`", value="支援分批停利！股數留空則全數賣出。\n*範例: `!賣出 2330 850 1000`*", inline=False)
-    embed_cmd.add_field(name="🏆 `!績效 [YYYY-MM]`", value="查看總績效與月度明細。\n*範例: `!績效` 或 `!績效 2026-04`*", inline=False)
+    embed_cmd.add_field(name="💸 `!賣出 [代號] [賣出價] [賣出股數]`", value="結算並記錄損益。股數留空則全數賣出。\n*範例: `!賣出 2330 850 1000`*", inline=False)
+    embed_cmd.add_field(name="🏆 `!績效 [YYYY-MM]`", value="查看總績效與月度績效明細。\n*範例: `!績效` 或 `!績效 2026-04`*", inline=False)
     
-    # 第二張卡片：操盤策略心法 (白話文詳解)
     embed_strat = discord.Embed(
         title="📖 【五大量化策略】AI 雙重視角操盤邏輯",
         description="系統會根據您選擇的策略，同時給予短線客與波段客的操作建議：",
@@ -508,19 +507,19 @@ async def 健檢(ctx):
     except asyncio.TimeoutError:
         await msg.edit(content="⚠️ 運算逾時，Yahoo 財經連線不穩，請稍後再試。")
 
-# 💡 更新了「股數」參數
 @bot.command()
-async def 新增(ctx, code: str, price: float, shares: int, strat_num: str, name: str = "", tp: float = None, sl: float = None):
-    if not name:
-        tickers_dict = get_all_taiwan_tickers()
-        exact_ticker = f"{code}.TW" if f"{code}.TW" in tickers_dict else f"{code}.TWO"
-        if exact_ticker in tickers_dict: name = tickers_dict[exact_ticker]['name']
-        else: name = "未知名稱"
+async def 新增(ctx, code: str, price: float, shares: int, strat_num: str, tp: float = None, sl: float = None):
+    # 💡 強制全自動抓取名稱，不再需要使用者手動輸入
+    tickers_dict = get_all_taiwan_tickers()
+    exact_ticker = f"{code}.TW" if f"{code}.TW" in tickers_dict else f"{code}.TWO"
+    if exact_ticker in tickers_dict: 
+        name = tickers_dict[exact_ticker]['name']
+    else: 
+        name = "未知名稱"
             
     full_strat = STRAT_MAP.get(strat_num, strat_num) 
     data = load_data()
     
-    # 💡 自動加碼/攤平 計算邏輯
     is_addon = False
     old_shares = 0
     old_price = 0
@@ -530,16 +529,13 @@ async def 新增(ctx, code: str, price: float, shares: int, strat_num: str, name
         old_shares = data[code].get('shares', 1000)
         old_price = data[code].get('buy_price', 0)
         
-        # 計算新均價：(舊總金額 + 新總金額) / 新總股數
         total_cost = (old_price * old_shares) + (price * shares)
         new_total_shares = old_shares + shares
         new_avg_price = round(total_cost / new_total_shares, 2)
         
-        # 更新變數準備存檔
         price = new_avg_price
         shares = new_total_shares
         
-        # 如果這次沒填寫停損停利，則沿用舊的設定
         if tp is None: tp = data[code].get('tp_pct')
         if sl is None: sl = data[code].get('sl_pct')
 
@@ -549,13 +545,11 @@ async def 新增(ctx, code: str, price: float, shares: int, strat_num: str, name
     display_title = f"{code} {name}".strip()
     风控文 = f" | 停利: +{tp}% 停損: -{sl}%" if (tp or sl) else " | 未設定風控"
     
-    # 依據是「新買」還是「加碼」回傳不同訊息
     if is_addon:
         await ctx.send(f"🔄 已自動為 **{display_title}** 執行【加碼/攤平】計算！\n加碼前: 均價 `{old_price}` ({old_shares:,} 股)\n新均價: `{price}` (總計 `{shares:,}` 股)\n當前策略: `{full_strat}`{风控文}")
     else:
         await ctx.send(f"✅ 已新增 **{display_title}**\n總投入: `{int(price*shares):,}` (均價 {price} x {shares:,} 股)\n策略: `{full_strat}`{风控文}")
 
-# 💡 全新部位校正指令 (取代 !成本)
 @bot.command()
 async def 部位(ctx, code: str, new_price: float, new_shares: int):
     data = load_data()
@@ -582,6 +576,15 @@ async def 風控(ctx, code: str, tp: float, sl: float):
     else: await ctx.send(f"⚠️ 找不到代號 {code}。")
 
 @bot.command()
+async def 命名(ctx, code: str, name: str):
+    data = load_data()
+    if code in data:
+        data[code]['name'] = name
+        save_data(data)
+        await ctx.send(f"✅ 已將代號 **{code}** 命名為 **{name}**")
+    else: await ctx.send(f"⚠️ 找不到代號 {code}。")
+
+@bot.command()
 async def 刪除(ctx, code: str):
     data = load_data()
     if code in data:
@@ -602,7 +605,6 @@ async def 策略(ctx, code: str, strat_num: str):
         await ctx.send(f"✅ **{code} {name}** 策略已更新為: `{full_strat}`")
     else: await ctx.send(f"⚠️ 找不到代號 {code}。")
 
-# 💡 支援分批賣出的升級版
 @bot.command()
 async def 賣出(ctx, code: str, sell_price: float, sell_shares: int = None):
     data = load_data()
@@ -612,12 +614,12 @@ async def 賣出(ctx, code: str, sell_price: float, sell_shares: int = None):
     
     info = data[code]
     buy_price = info.get('buy_price', 0)
-    held_shares = info.get('shares', 1000) # 舊資料防呆預設 1000
+    held_shares = info.get('shares', 1000) 
     name = info.get('name', '')
     strat = info.get('strategy', '無')
     
     if sell_shares is None or sell_shares <= 0:
-        sell_shares = held_shares # 沒填寫就視為全賣
+        sell_shares = held_shares 
         
     if sell_shares > held_shares:
         await ctx.send(f"⚠️ 庫存不足！你手上只有 `{held_shares}` 股 **{code} {name}**，無法賣出 `{sell_shares}` 股。")
@@ -657,7 +659,6 @@ async def 賣出(ctx, code: str, sell_price: float, sell_shares: int = None):
     history['trades'].append(record)
     save_history(history)
     
-    # 分批賣出邏輯
     is_partial_sell = False
     if sell_shares == held_shares:
         del data[code]
