@@ -555,8 +555,17 @@ async def 賣出(ctx, code: str, sell_price: float, shares: int = 1000):
     
     info = data[code]
     buy_price = info.get('buy_price', 0)
-    name = info.get('name', '未知名稱')
+    name = info.get('name', '')
     strat = info.get('strategy', '無')
+    
+    # 💡 終極防呆：如果在資料庫裡沒有名稱，或是顯示未知名稱，結算前強制補抓一次！
+    if not name or name == "未知名稱":
+        tickers_dict = get_all_taiwan_tickers()
+        exact_ticker = f"{code}.TW" if f"{code}.TW" in tickers_dict else f"{code}.TWO"
+        if exact_ticker in tickers_dict:
+            name = tickers_dict[exact_ticker]['name']
+        else:
+            name = "未知名稱"
     
     pnl_amount = (sell_price - buy_price) * shares
     pnl_pct = round(((sell_price - buy_price) / buy_price) * 100, 2) if buy_price > 0 else 0
@@ -574,7 +583,7 @@ async def 賣出(ctx, code: str, sell_price: float, shares: int = 1000):
     record = {
         "date": datetime.now(timezone(timedelta(hours=8))).strftime('%Y-%m-%d %H:%M'),
         "code": code,
-        "name": name,
+        "name": name,  # 這裡會存入修正後的正確名稱
         "buy_price": buy_price,
         "sell_price": sell_price,
         "shares": shares,
@@ -609,7 +618,6 @@ async def 賣出(ctx, code: str, sell_price: float, shares: int = 1000):
         embed.add_field(name="🩸 AI 戰敗檢討報告", value=loss_reason, inline=False)
         
     await msg.edit(content=None, embed=embed)
-
 @bot.command()
 async def 績效(ctx):
     """ 查詢累積總績效與近期虧損檢討 """
