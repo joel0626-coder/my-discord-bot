@@ -257,7 +257,7 @@ def run_evaluation(code):
             else:
                 risk_advice = f"⚖️ **資金控管建議**：目前股價已在月線之下，若進場屬於左側摸底，請極度縮小部位。\n"
             
-            msg += f"💡 **【AI 教練結論】: 建議買進！**\n🔥 該股目前符合 **{', '.join(matched_strats)}** 的發動訊號。\n{risk_advice}若決定進場，請用 `!新增 {code} {close} {matched_strats[0][-1]}` 加入小秘書監控！"
+            msg += f"💡 **【AI 教練結論】: 建議買進！**\n🔥 該股目前符合 **{', '.join(matched_strats)}** 的發動訊號。\n{risk_advice}若決定進場，請用 `!新增 {code} {close} [股數] {matched_strats[0][-1]}` 加入小秘書監控！"
         else:
             msg += f"💡 **【AI 教練結論】: 建議觀望 👀**\n這檔股票目前技術面**並未觸發**任何高勝率或動能攻擊條件。請多看少做！"
             
@@ -265,12 +265,10 @@ def run_evaluation(code):
     except Exception as e:
         return f"❌ 評估過程發生錯誤: `{e}`"
 
-# 🔥 終極進化：攻守一體的 360 度健檢面板
 def run_health_check():
     portfolio = load_data()
     if not portfolio: return "⚠️ 資料庫為空，請用 `!新增` 指令建立股票。不知道怎麼用請輸入 `!指令`"
     
-    # 掃描前先統一確認大盤趨勢，避免重複請求
     market_uptrend = check_market_trend()
     tickers_dict = get_all_taiwan_tickers() 
     
@@ -304,10 +302,16 @@ def run_health_check():
             low = round(latest['Low'].item(), 2)
             open_px = latest['Open'].item()
             vol = latest['Volume'].item()
-            cost = info.get('buy_price', 0)
-            strat = info.get('strategy', '無')
-            profit = round(((close - cost) / cost) * 100, 2) if cost > 0 else 0
             
+            # 💡 資金部位與損益計算 (核心升級)
+            cost = info.get('buy_price', 0)
+            shares = info.get('shares', 1000) # 舊資料防呆，預設 1000 股
+            total_cost = int(round(cost * shares))
+            current_value = int(round(close * shares))
+            profit_amount = current_value - total_cost
+            profit_pct = round(((close - cost) / cost) * 100, 2) if cost > 0 else 0
+            
+            strat = info.get('strategy', '無')
             tp_pct, sl_pct = info.get('tp_pct', None), info.get('sl_pct', None)
             ma5, ma10, ma20 = round(latest['SMA_5'].item(), 2), round(latest['SMA_10'].item(), 2), round(latest['SMA_20'].item(), 2)
             ma60 = round(latest['SMA_60'].item(), 2)
@@ -321,7 +325,6 @@ def run_health_check():
             max20_prev = prev['Max_20'].item()
             is_uptrend = latest['SMA_60'].item() > prev['SMA_60'].item()
             
-            # 💡 計算攻擊訊號 (與評估邏輯同步)
             bb_pass = (bb_width < 0.10) and (close > bb_upper) and (vol > (vol_5ma * 1.5)) and is_uptrend and (close > open_px)
             macd_pass = is_uptrend and (close > ma60) and (macd_val > sig_val) and (macd_val > prev_macd)
             rsi_pass = (close < ma20) and (prev_rsi < 35) and (rsi_val >= 30) and (rsi_val > prev_rsi)
@@ -334,23 +337,19 @@ def run_health_check():
             
             alert_msg = ""
             
-            # 優先判定：自訂停損停利點 (最嚴格防線)
-            if tp_pct and profit >= float(tp_pct): alert_msg = f"💰 [已達停利點] 報酬率 {profit}% (+{tp_pct}%)！"
-            elif sl_pct and profit <= -float(sl_pct): alert_msg = f"🛑 [已達停損點] 報酬率 {profit}% (-{sl_pct}%)！"
+            if tp_pct and profit_pct >= float(tp_pct): alert_msg = f"💰 [已達停利點] 報酬率 {profit_pct}% (+{tp_pct}%)！"
+            elif sl_pct and profit_pct <= -float(sl_pct): alert_msg = f"🛑 [已達停損點] 報酬率 {profit_pct}% (-{sl_pct}%)！"
             
             panel_str = ""
             if alert_msg:
                 panel_str = f"   👉 {alert_msg}"
             else:
-                # ==========================================
-                # 🔥 AI 360 度攻守一體診斷系統
-                # ==========================================
                 is_s15 = "1" in strat or "布林" in strat or "5" in strat or "創高" in strat
                 is_s2 = "2" in strat or "MACD" in strat
                 is_s3 = "3" in strat or "RSI" in strat
                 is_s4 = "4" in strat or "回踩" in strat
                 
-                # 1. 動能/創高視角 (S1/S5)
+                # 1. 動能/創高
                 msg_15 = ""
                 if close < ma20: msg_15 = "🚨 [破月線] 動能波段皆破壞，建議清倉。"
                 elif close < ma10: msg_15 = "⚠️ [破10日線] 短線強烈建議出場；波段減碼一半。"
@@ -361,7 +360,7 @@ def run_health_check():
                     msg_15 = "💡 [回落通道] 漲多休息，進入高檔震盪。"
                 else: msg_15 = "🚀 [強勢多頭] 延續上攻慣性，緊抱！"
 
-                # 2. 波段趨勢視角 (S2)
+                # 2. 波段趨勢
                 msg_2 = ""
                 if close < ma20: msg_2 = "🚨 [破月線] 趨勢防守底線遭貫破，建議清倉！"
                 elif macd_val < sig_val: msg_2 = "⚠️ [MACD死叉] 短線出場；波段考慮減碼。"
@@ -369,27 +368,25 @@ def run_health_check():
                 elif macd_pass: msg_2 = "🎯 [趨勢發動] MACD多頭發散，新波段攻擊中！"
                 else: msg_2 = "🌊 [波段健康] 趨勢向上無虞。"
 
-                # 3. 逆勢反彈視角 (S3)
+                # 3. 逆勢反彈
                 msg_3 = ""
                 if close < ma20 * 0.97: msg_3 = "🚨 [破底] 跌破月線3%，反彈徹底失敗，停損！"
                 elif rsi_val < prev_rsi and prev_rsi > 70: msg_3 = "💰 [高檔反轉] 短線全數停利；波段分批減碼。"
                 elif rsi_pass: msg_3 = "🎯 [抄底發動] 跌破超賣區後翻揚，反彈確立！"
                 else: msg_3 = f"🎣 [RSI {round(rsi_val, 1)}] 處於反彈或震盪週期。"
 
-                # 4. 支撐防守視角 (S4)
+                # 4. 支撐防守
                 msg_4 = ""
                 if close < ma20 * 0.97: msg_4 = "🚨 [防守貫破] 跌穿3%主力洗盤區，毫無懸念停損！"
                 elif close < ma20: msg_4 = "⚠️ [支撐測試] 跌破月線，進入3%洗盤緩衝區，密切觀察。"
                 elif pullback_pass: msg_4 = "🎯 [回踩發動] 縮量回測月線有守，絕佳防守加碼點！"
                 else: msg_4 = "🛡️ [月線有守] 支撐強勁，安全續抱。"
 
-                # 標記使用者當前選擇的策略
                 s15_label = "🔥 動能/創高" + (" (★)" if is_s15 else "")
                 s2_label  = "🌊 波段趨勢" + (" (★)" if is_s2 else "")
                 s3_label  = "🎣 逆勢反彈" + (" (★)" if is_s3 else "")
                 s4_label  = "🛡️ 支撐防守" + (" (★)" if is_s4 else "")
 
-                # 組合優雅排版
                 panel_str = (
                     f"   [關鍵位階]: 5日 `{ma5}` | 10日 `{ma10}` | 月線 `{ma20}`\n"
                     f"   -------------------------\n"
@@ -400,8 +397,14 @@ def run_health_check():
                 )
 
             tp_sl_info = f" | 停利: `+{tp_pct}%` 停損: `-{sl_pct}%`" if (tp_pct or sl_pct) else " | 風控: `未設定`"
+            pnl_amt_str = f"+{profit_amount:,}" if profit_amount >= 0 else f"{profit_amount:,}"
             
-            msg += f"📌 **{display_title}**\n   市價: `{close}` | 成本: `{cost}` | 報酬: `{profit}%`{tp_sl_info}\n   策略: `{strat}`\n{panel_str}\n=========================\n"
+            # 💡 精美的部位控管顯示
+            msg += f"📌 **{display_title}**\n"
+            msg += f"   市價: `{close}` | 均價: `{cost}` | 股數: `{shares:,}` 股\n"
+            msg += f"   總成本: `{total_cost:,}` | 總市值: `{current_value:,}`\n"
+            msg += f"   帳面損益: **{pnl_amt_str}** (`{profit_pct}%`){tp_sl_info}\n"
+            msg += f"   策略: `{strat}`\n{panel_str}\n=========================\n"
         except Exception as e:
             msg += f"❌ **{code} {info.get('name', '')}**: 運算錯誤 ({e})\n\n"
             
@@ -442,15 +445,15 @@ async def 指令(ctx):
         description="老闆，請隨時對我下達以下指令（格式內的 `[ ]` 請記得空一格）：",
         color=0x2ECC71
     )
-    embed_cmd.add_field(name="🔍 `!健檢`", value="360度全方位掃描目前庫存的狀態與攻擊訊號。", inline=False)
+    embed_cmd.add_field(name="🔍 `!健檢`", value="360度全方位掃描目前庫存狀態與帳面金額。", inline=False)
     embed_cmd.add_field(name="🔬 `!評估 [代號]`", value="個股 X 光機！幫你鑑定這檔股票是否符合買進策略。", inline=False)
-    embed_cmd.add_field(name="📥 `!新增 [代號] [成本] [策略] [名稱] [停利%] [停損%]`", value="將股票交給小秘書監控 (名稱留空會自動抓取)。", inline=False)
-    embed_cmd.add_field(name="✏️ `!成本 [代號] [新成本]`", value="修改持股的買入平均成本價。\n*範例: `!成本 2330 820`*", inline=False)
+    embed_cmd.add_field(name="📥 `!新增 [代號] [均價] [股數] [策略] [名稱] [停利%] [停損%]`", value="將股票交給小秘書監控。\n*範例: `!新增 2330 800 2000 1` (買2張)*", inline=False)
+    embed_cmd.add_field(name="✏️ `!部位 [代號] [新均價] [新總股數]`", value="修正持股的成本價與總股數。\n*範例: `!部位 2330 820 3000`*", inline=False)
     embed_cmd.add_field(name="🛡️ `!風控 [代號] [停利%] [停損%]`", value="隨時更新股票的停損停利點。", inline=False)
     embed_cmd.add_field(name="⚙️ `!策略 [代號] [策略代號]`", value="修改持股的防護策略。", inline=False)
     embed_cmd.add_field(name="🗑️ `!刪除 [代號]`", value="將股票從監控清單中移除。", inline=False)
-    embed_cmd.add_field(name="💸 `!賣出 [代號] [賣出價] [股數]`", value="結算交易並記錄損益(股數預設1000)。\n*範例: `!賣出 2330 850 2000`*", inline=False)
-    embed_cmd.add_field(name="🏆 `!績效 [YYYY-MM]`", value="查看總績效與月度績效明細。\n*範例: `!績效` (看當月) 或 `!績效 2026-04`*", inline=False)
+    embed_cmd.add_field(name="💸 `!賣出 [代號] [賣出價] [賣出股數]`", value="支援分批停利！股數留空則全數賣出。\n*範例: `!賣出 2330 850 1000`*", inline=False)
+    embed_cmd.add_field(name="🏆 `!績效 [YYYY-MM]`", value="查看總績效與月度績效明細。\n*範例: `!績效` 或 `!績效 2026-04`*", inline=False)
     
     await ctx.send(embed=embed_cmd)
 
@@ -467,7 +470,7 @@ async def 評估(ctx, code: str):
 
 @bot.command()
 async def 健檢(ctx):
-    msg = await ctx.send("⏳ 正在啟動 360 度全方位庫存診斷系統 (含攻擊訊號掃描)...")
+    msg = await ctx.send("⏳ 正在啟動 360 度全方位庫存診斷與資金部位結算...")
     try:
         result = await asyncio.wait_for(asyncio.to_thread(run_health_check), timeout=120.0)
         if len(result) > 1900: result = result[:1900] + "\n\n⚠️ ...(庫存過多，字數達 Discord 上限)"
@@ -475,8 +478,9 @@ async def 健檢(ctx):
     except asyncio.TimeoutError:
         await msg.edit(content="⚠️ 運算逾時，Yahoo 財經連線不穩，請稍後再試。")
 
+# 💡 更新了「股數」參數
 @bot.command()
-async def 新增(ctx, code: str, price: float, strat_num: str, name: str = "", tp: float = None, sl: float = None):
+async def 新增(ctx, code: str, price: float, shares: int, strat_num: str, name: str = "", tp: float = None, sl: float = None):
     if not name:
         tickers_dict = get_all_taiwan_tickers()
         exact_ticker = f"{code}.TW" if f"{code}.TW" in tickers_dict else f"{code}.TWO"
@@ -485,22 +489,25 @@ async def 新增(ctx, code: str, price: float, strat_num: str, name: str = "", t
             
     full_strat = STRAT_MAP.get(strat_num, strat_num) 
     data = load_data()
-    data[code] = {"buy_price": price, "strategy": full_strat, "name": name, "tp_pct": tp, "sl_pct": sl}
+    data[code] = {"buy_price": price, "shares": shares, "strategy": full_strat, "name": name, "tp_pct": tp, "sl_pct": sl}
     save_data(data)
     
     display_title = f"{code} {name}".strip()
     风控文 = f" | 停利: +{tp}% 停損: -{sl}%" if (tp or sl) else " | 未設定風控"
-    await ctx.send(f"✅ 已新增 **{display_title}**\n成本: `{price}`\n策略: `{full_strat}`{风控文}")
+    await ctx.send(f"✅ 已新增 **{display_title}**\n總投入: `{int(price*shares):,}` (均價 {price} x {shares}股)\n策略: `{full_strat}`{风控文}")
 
+# 💡 全新部位校正指令 (取代 !成本)
 @bot.command()
-async def 成本(ctx, code: str, new_price: float):
+async def 部位(ctx, code: str, new_price: float, new_shares: int):
     data = load_data()
     if code in data:
         old_price = data[code].get('buy_price', 0)
+        old_shares = data[code].get('shares', 1000)
         data[code]['buy_price'] = new_price
+        data[code]['shares'] = new_shares
         save_data(data)
         name = data[code].get('name', '')
-        await ctx.send(f"✅ **{code} {name}** 成本價已成功從 `{old_price}` 修改為 `{new_price}`！")
+        await ctx.send(f"✅ **{code} {name}** 庫存已更新！\n成本價: `{old_price}` ➡️ `{new_price}`\n總股數: `{old_shares:,}` ➡️ `{new_shares:,}`")
     else:
         await ctx.send(f"⚠️ 老闆，你的監控清單裡找不到代號 **{code}** 喔！")
 
@@ -536,8 +543,9 @@ async def 策略(ctx, code: str, strat_num: str):
         await ctx.send(f"✅ **{code} {name}** 策略已更新為: `{full_strat}`")
     else: await ctx.send(f"⚠️ 找不到代號 {code}。")
 
+# 💡 支援分批賣出的升級版
 @bot.command()
-async def 賣出(ctx, code: str, sell_price: float, shares: int = 1000):
+async def 賣出(ctx, code: str, sell_price: float, sell_shares: int = None):
     data = load_data()
     if code not in data:
         await ctx.send(f"⚠️ 老闆，你的監控清單裡找不到代號 **{code}** 的庫存記錄喔！")
@@ -545,8 +553,16 @@ async def 賣出(ctx, code: str, sell_price: float, shares: int = 1000):
     
     info = data[code]
     buy_price = info.get('buy_price', 0)
+    held_shares = info.get('shares', 1000) # 舊資料防呆預設 1000
     name = info.get('name', '')
     strat = info.get('strategy', '無')
+    
+    if sell_shares is None or sell_shares <= 0:
+        sell_shares = held_shares # 沒填寫就視為全賣
+        
+    if sell_shares > held_shares:
+        await ctx.send(f"⚠️ 庫存不足！你手上只有 `{held_shares}` 股 **{code} {name}**，無法賣出 `{sell_shares}` 股。")
+        return
     
     if not name or name == "未知名稱":
         tickers_dict = get_all_taiwan_tickers()
@@ -554,7 +570,7 @@ async def 賣出(ctx, code: str, sell_price: float, shares: int = 1000):
         if exact_ticker in tickers_dict: name = tickers_dict[exact_ticker]['name']
         else: name = "未知名稱"
     
-    pnl_amount = (sell_price - buy_price) * shares
+    pnl_amount = (sell_price - buy_price) * sell_shares
     pnl_pct = round(((sell_price - buy_price) / buy_price) * 100, 2) if buy_price > 0 else 0
     
     msg = await ctx.send(f"⏳ 正在結算 **{code} {name}** 交易，計算損益中...")
@@ -573,7 +589,7 @@ async def 賣出(ctx, code: str, sell_price: float, shares: int = 1000):
         "name": name,
         "buy_price": buy_price,
         "sell_price": sell_price,
-        "shares": shares,
+        "shares": sell_shares,
         "pnl": pnl_amount,
         "pnl_pct": pnl_pct,
         "strategy": strat,
@@ -582,23 +598,35 @@ async def 賣出(ctx, code: str, sell_price: float, shares: int = 1000):
     history['trades'].append(record)
     save_history(history)
     
-    del data[code]
+    # 分批賣出邏輯
+    is_partial_sell = False
+    if sell_shares == held_shares:
+        del data[code]
+    else:
+        is_partial_sell = True
+        data[code]['shares'] -= sell_shares
     save_data(data)
     
+    title = f"🤝 交易結算單：{code} {name}"
+    if is_partial_sell: title += " (分批停利/損)"
+        
     embed = discord.Embed(
-        title=f"🤝 交易結算單：{code} {name}",
+        title=title,
         color=0xE74C3C if pnl_amount < 0 else 0x2ECC71 
     )
-    embed.add_field(name="買入成本", value=f"`{buy_price}`", inline=True)
+    embed.add_field(name="買入均價", value=f"`{buy_price}`", inline=True)
     embed.add_field(name="賣出價格", value=f"`{sell_price}`", inline=True)
-    embed.add_field(name="交易股數", value=f"`{shares}` 股", inline=True)
+    embed.add_field(name="交易股數", value=f"`{sell_shares:,}` 股", inline=True)
     
-    pnl_str = f"+{int(pnl_amount)}" if pnl_amount >= 0 else f"{int(pnl_amount)}"
+    pnl_str = f"+{int(pnl_amount):,}" if pnl_amount >= 0 else f"{int(pnl_amount):,}"
     pnl_pct_str = f"+{pnl_pct}%" if pnl_pct >= 0 else f"{pnl_pct}%"
-    embed.add_field(name="💵 單筆損益", value=f"**{pnl_str} 元** ({pnl_pct_str})", inline=False)
+    embed.add_field(name="💵 單筆結算損益", value=f"**{pnl_str} 元** ({pnl_pct_str})", inline=False)
+    
+    if is_partial_sell:
+        embed.add_field(name="📦 剩餘庫存", value=f"尚有 `{data[code]['shares']:,}` 股持續監控中", inline=False)
     
     total_pnl = history['total_pnl']
-    total_str = f"+{int(total_pnl)}" if total_pnl >= 0 else f"{int(total_pnl)}"
+    total_str = f"+{int(total_pnl):,}" if total_pnl >= 0 else f"{int(total_pnl):,}"
     embed.add_field(name="🏦 歷史累積總損益", value=f"**{total_str} 元**", inline=False)
     
     if loss_reason: embed.add_field(name="🩸 AI 戰敗檢討報告", value=loss_reason, inline=False)
@@ -632,14 +660,14 @@ async def 績效(ctx, target_month: str = None):
         target_month = sorted(monthly_data.keys())[-1]
 
     embed = discord.Embed(title="🏆 雲端小秘書 - 月度績效戰報", color=0xF1C40F)
-    total_str = f"+{int(total_all_time)}" if total_all_time >= 0 else f"{int(total_all_time)}"
+    total_str = f"+{int(total_all_time):,}" if total_all_time >= 0 else f"{int(total_all_time):,}"
     embed.add_field(name="🌍 歷史累積總損益 (All-Time)", value=f"**{total_str} 元**", inline=False)
     
     recent_months = sorted(monthly_data.keys(), reverse=True)[:3]
     month_summary_str = ""
     for m in recent_months:
         m_pnl = monthly_data[m]['pnl']
-        m_str = f"+{int(m_pnl)}" if m_pnl >= 0 else f"{int(m_pnl)}"
+        m_str = f"+{int(m_pnl):,}" if m_pnl >= 0 else f"{int(m_pnl):,}"
         total_trades = monthly_data[m]['wins'] + monthly_data[m]['losses']
         m_win_rate = round(monthly_data[m]['wins'] / total_trades * 100, 1) if total_trades > 0 else 0
         month_summary_str += f"**{m}**: `{m_str}元` (勝率 {m_win_rate}%)\n"
@@ -649,13 +677,13 @@ async def 績效(ctx, target_month: str = None):
     if target_month in monthly_data:
         t_data = monthly_data[target_month]
         t_pnl = t_data['pnl']
-        t_str = f"+{int(t_pnl)}" if t_pnl >= 0 else f"{int(t_pnl)}"
+        t_str = f"+{int(t_pnl):,}" if t_pnl >= 0 else f"{int(t_pnl):,}"
         t_total = t_data['wins'] + t_data['losses']
         t_win_rate = round(t_data['wins'] / t_total * 100, 1) if t_total > 0 else 0
         
         detail_str = ""
         for t in t_data['details']:
-            p_str = f"+{int(t['pnl'])}" if t['pnl'] >= 0 else f"{int(t['pnl'])}"
+            p_str = f"+{int(t['pnl']):,}" if t['pnl'] >= 0 else f"{int(t['pnl']):,}"
             detail_str += f"• **{t['code']} {t['name']}**: `{p_str}元` ({t['pnl_pct']}%)\n"
             
         if len(detail_str) > 900: detail_str = detail_str[:900] + "...\n(為節省版面，隱藏部分明細)"
