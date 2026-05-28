@@ -185,7 +185,7 @@ def run_loss_analysis(code, name, buy_price, sell_price, strat):
     except Exception as e:
         return f"分析失敗 ({e})"
 
-# 🔥 全新升級：AI 個股深度健檢系統 (!分析)
+# 🔥 修正版：AI 個股深度健檢系統 (!分析)
 def run_deep_analysis(code):
     tickers_dict = get_all_taiwan_tickers() 
     exact_ticker = f"{code}.TW"
@@ -199,7 +199,7 @@ def run_deep_analysis(code):
         stock_name = tickers_dict[exact_ticker]['name']
         
     try:
-        # 1. 抓取基本面 (yfinance info)
+        # 1. 抓取基本面
         ticker_obj = yf.Ticker(exact_ticker)
         info = ticker_obj.info
         sector = info.get('sector', info.get('industry', '未分類產業'))
@@ -224,51 +224,59 @@ def run_deep_analysis(code):
         macd = round(latest['MACD'].item(), 2)
         sig = round(latest['Signal'].item(), 2)
         
-        # 3. 抓取法人籌碼 (FinMind API - 近 5 個交易日)
+        # 3. 抓取法人籌碼 (FinMind API - 修正拉長為近 30 天，確保能撈到 5 個交易日)
         foreign_net_lots = 0
         trust_net_lots = 0
         chip_status = ""
         try:
-            start_date = (datetime.now() - timedelta(days=15)).strftime('%Y-%m-%d')
+            start_date = (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d')
             url = "https://api.finmindtrade.com/api/v4/data"
             params = {"dataset": "TaiwanStockInstitutionalInvestorsBuySell", "data_id": code, "start_date": start_date, "token": FINMIND_TOKEN}
-            res = requests.get(url, params=params, timeout=5).json()
+            res = requests.get(url, params=params, timeout=8).json()
+            
             if res.get('status') == 200:
                 data_list = res.get('data', [])
-                dates = sorted(list(set(d['date'] for d in data_list)), reverse=True)[:5] # 取最近5天
-                foreign_net = 0
-                trust_net = 0
-                for d in data_list:
-                    if d['date'] in dates:
-                        name = d.get('name', '')
-                        net = d.get('buy', 0) - d.get('sell', 0)
-                        if '外資' in name: foreign_net += net
-                        elif '投信' in name: trust_net += net
-                foreign_net_lots = int(foreign_net / 1000)
-                trust_net_lots = int(trust_net / 1000)
                 
-                f_str = f"買超 {foreign_net_lots}" if foreign_net_lots >= 0 else f"賣超 {abs(foreign_net_lots)}"
-                t_str = f"買超 {trust_net_lots}" if trust_net_lots >= 0 else f"賣超 {abs(trust_net_lots)}"
-                chip_status = f"近 5 日外資合計: `{f_str}` 張\n近 5 日投信合計: `{t_str}` 張\n"
-                
-                if foreign_net_lots > 0 and trust_net_lots > 0: chip_status += "    結論：法人同步看好，籌碼集中度極佳。"
-                elif trust_net_lots > 0: chip_status += "    結論：投信積極進駐，內資籌碼集中。"
-                elif foreign_net_lots < 0 and trust_net_lots < 0: chip_status += "    結論：土洋法人同步倒貨，籌碼結構轉弱。"
-                else: chip_status += "    結論：土洋對作，籌碼目前處於換手或震盪狀態。"
+                if not data_list: # 💡 防呆：如果完全沒抓到資料
+                    chip_status = "⚠️ FinMind 伺服器暫無此檔股票近期的籌碼資料 (可能為免費用戶額度延遲)。\n    結論：目前缺乏近期法人數據，請單純參考技術面操作。"
+                else:
+                    dates = sorted(list(set(d['date'] for d in data_list)), reverse=True)[:5] # 取最近5有資料的天數
+                    foreign_net = 0
+                    trust_net = 0
+                    for d in data_list:
+                        if d['date'] in dates:
+                            name = d.get('name', '')
+                            net = d.get('buy', 0) - d.get('sell', 0)
+                            if '外資' in name or 'Foreign' in name: foreign_net += net
+                            elif '投信' in name or 'Investment' in name: trust_net += net
+                            
+                    foreign_net_lots = int(foreign_net / 1000)
+                    trust_net_lots = int(trust_net / 1000)
+                    
+                    if foreign_net_lots == 0 and trust_net_lots == 0:
+                        chip_status = "⚠️ 近 5 日無明顯外資與投信進出紀錄 (或 API 資料尚未更新)。"
+                    else:
+                        f_str = f"買超 {foreign_net_lots}" if foreign_net_lots >= 0 else f"賣超 {abs(foreign_net_lots)}"
+                        t_str = f"買超 {trust_net_lots}" if trust_net_lots >= 0 else f"賣超 {abs(trust_net_lots)}"
+                        chip_status = f"近 5 日外資合計: `{f_str}` 張\n近 5 日投信合計: `{t_str}` 張\n"
+                        
+                        if foreign_net_lots > 0 and trust_net_lots > 0: chip_status += "    結論：法人同步看好，籌碼集中度極佳。"
+                        elif trust_net_lots > 0: chip_status += "    結論：投信積極進駐，內資籌碼集中。"
+                        elif foreign_net_lots < 0 and trust_net_lots < 0: chip_status += "    結論：土洋法人同步倒貨，籌碼結構轉弱。"
+                        elif foreign_net_lots == 0 or trust_net_lots == 0: chip_status += "    結論：單一法人靜待觀望，籌碼動能一般。"
+                        else: chip_status += "    結論：土洋對作，籌碼目前處於換手或震盪狀態。"
             else:
-                chip_status = "無法取得近期籌碼資料。"
+                chip_status = f"⚠️ 無法取得近期籌碼資料 (API 回傳狀態碼: {res.get('status')})。"
         except Exception as e:
-            chip_status = "籌碼資料伺服器連線異常。"
+            chip_status = "⚠️ 籌碼資料伺服器連線異常或超時。"
 
         # 4. 判斷邏輯
-        # 趨勢
         if close > ma20 and close > ma60: trend_msg = f"目前股價 (`{close}`) 站穩月線 (`{ma20}`) 與季線 (`{ma60}`) 之上，屬於標準多頭排列。"
         elif close < ma20 and close < ma60: trend_msg = f"目前股價 (`{close}`) 跌破月線 (`{ma20}`) 與季線 (`{ma60}`)，處於空頭弱勢格局。"
         else: trend_msg = f"目前股價處於月線與季線之間，屬於震盪整理階段。"
         
         if close >= max20 * 0.97 and close >= ma20: trend_msg += f" 逼近波段高點 (`{max20}`元)，隨時準備挑戰前高，短線資金動能強勁。"
         
-        # 動能
         if rsi > 70: rsi_msg = "位於 70 以上極強區間，動能強悍但也須留意短線過熱風險。"
         elif rsi > 50: rsi_msg = "位於 50~70 偏多區間，動能健康溫和。"
         elif rsi > 30: rsi_msg = "位於 30~50 偏弱區間，多方動能受壓。"
@@ -277,7 +285,6 @@ def run_deep_analysis(code):
         if macd > sig: macd_msg = f"快線 (`{macd}`) 大於 慢線 (`{sig}`)\n    維持多頭黃金交叉狀態，動能充沛。"
         else: macd_msg = f"快線 (`{macd}`) 小於 慢線 (`{sig}`)\n    維持空頭死叉狀態，動能受壓。"
 
-        # 防線計算
         def1_low, def1_high = round(ma10 * 0.98, 1), round(ma10 * 1.01, 1)
         def2_low, def2_high = round(ma20 * 0.97, 1), round(ma20 * 1.02, 1)
 
@@ -573,7 +580,7 @@ def run_health_check():
         except Exception as e:
             stock_messages.append(f"❌ **{code} {info.get('name', '')}**: 運算錯誤 ({e})\n\n")
 
-    header_msg = "📊 **【雲端精準監控戰報】(V8 全能戰報升級版)**\n"
+    header_msg = "📊 **【雲端精準監控戰報】(V8.1 全能戰報升級版)**\n"
     if not market_uptrend:
         header_msg += "⚠️ **[大盤警示]** 加權指數跌破月線，系統已自動關閉攻擊判定！\n"
     header_msg += "=========================\n"
@@ -649,7 +656,7 @@ async def 指令(ctx):
     embed_cmd.add_field(name="🔍 `!健檢`", value="360度全方位掃描目前庫存狀態與帳戶總權益。", inline=False)
     embed_cmd.add_field(name="🔬 `!評估 [代號]`", value="個股攻擊雷達！自動依據本金換算建議買進股數。", inline=False)
     embed_cmd.add_field(name="📑 `!分析 [代號]`", value="【全新】法人級個股深度研究報告 (含外資投信籌碼)。", inline=False)
-    embed_cmd.add_field(name="📥 `!新增 [代號] [均價] [股數] [策略] [停利%] [停損%]`", value="將股票交給小秘書監控 (名稱全自動抓取)。\n*範例: `!新增 2330 800 2000 1` (買2張)*", inline=False)
+    embed_cmd.add_field(name="📥 `!新增 [代號] [均價] [股數] [策略] [停利%] [停損%]`", value="將股票交給小秘書監控 (名稱全自動抓取)。\n*範例: `!新增 2330 800 2000 1`*", inline=False)
     embed_cmd.add_field(name="✏️ `!部位 [代號] [新均價] [新總股數]`", value="手動校正持股的成本價與總股數。\n*範例: `!部位 2330 820 3000`*", inline=False)
     embed_cmd.add_field(name="🛡️ `!風控 [代號] [停利%] [停損%]`", value="隨時更新股票的停損停利點。", inline=False)
     embed_cmd.add_field(name="⚙️ `!策略 [代號] [策略代號]`", value="修改持股的防護策略。", inline=False)
@@ -695,7 +702,6 @@ async def 本金(ctx, amount: float):
     save_config(config)
     await ctx.send(f"✅ 初始本金已成功設定為: `{int(amount):,}` 元！\n系統將自動結合您的「歷史實現損益」來精準計算您的即時可用現金與帳戶總權益。")
 
-# 🔥 全新升級指令：分析 (法人級籌碼與深度報告)
 @bot.command()
 async def 分析(ctx, code: str):
     msg = await ctx.send(f"⏳ 正在調閱 `{code}` 的技術線圖與三大法人籌碼，撰寫 AI 深度健檢報告...")
