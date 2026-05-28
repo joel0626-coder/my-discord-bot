@@ -16,7 +16,9 @@ logging.getLogger('yfinance').setLevel(logging.CRITICAL)
 # 系統與金鑰設定
 TOKEN = os.environ.get('DISCORD_TOKEN')
 FINMIND_TOKEN = os.environ.get('FINMIND_TOKEN', "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJ1c2VyX2lkIjoiam9lbDA2MjYiLCJlbWFpbCI6ImpvZWwwNjI2QG1zbi5jb20iLCJ0b2tlbl92ZXJzaW9uIjowfQ.j1KeK6JfXNUX2WlEKYmdMctQV_9_xfwpzVlANplYafs")
+
 PORTFOLIO_FILE = "my_portfolio.json"
+TRADE_HISTORY_FILE = "trade_history.json"
 
 # ========= 🚨 你的專屬設定 =========
 PUSH_CHANNEL_ID = 1509058179458404495
@@ -30,6 +32,9 @@ STRAT_MAP = {
     "5": "5. 強勢創高確認 (高勝率攻擊)"
 }
 
+# =====================================================================
+# 🗂️ 資料庫存取模組
+# =====================================================================
 def load_data():
     if not os.path.exists(PORTFOLIO_FILE): return {}
     with open(PORTFOLIO_FILE, 'r', encoding='utf-8') as f: 
@@ -37,6 +42,16 @@ def load_data():
 
 def save_data(data):
     with open(PORTFOLIO_FILE, 'w', encoding='utf-8') as f: 
+        json.dump(data, f, indent=4, ensure_ascii=False)
+
+def load_history():
+    if not os.path.exists(TRADE_HISTORY_FILE): 
+        return {"total_pnl": 0.0, "trades": []}
+    with open(TRADE_HISTORY_FILE, 'r', encoding='utf-8') as f: 
+        return json.load(f)
+
+def save_history(data):
+    with open(TRADE_HISTORY_FILE, 'w', encoding='utf-8') as f: 
         json.dump(data, f, indent=4, ensure_ascii=False)
 
 # =====================================================================
@@ -70,7 +85,7 @@ def get_all_taiwan_tickers():
     return _TICKER_CACHE
 
 # =====================================================================
-# 🛡️ 核心：指標計算、環境濾網與個股評估
+# 🛡️ 核心：指標計算、環境濾網與戰敗分析
 # =====================================================================
 def calculate_indicators(df):
     if isinstance(df.columns, pd.MultiIndex):
@@ -118,6 +133,54 @@ def check_market_trend():
         return close > ma20
     except:
         return True
+
+def run_loss_analysis(code, name, buy_price, sell_price, strat):
+    """ 🩸 AI 戰敗檢討系統：分析虧損原因 """
+    tickers_dict = get_all_taiwan_tickers()
+    exact_ticker = f"{code}.TW" if f"{code}.TW" in tickers_dict else f"{code}.TWO"
+    
+    try:
+        df = yf.download(exact_ticker, period="3mo", progress=False)
+        if df.empty: return "無法取得報價，無法進行深入分析。"
+        
+        df = calculate_indicators(df)
+        latest = df.iloc[-1]
+        
+        ma10 = latest['SMA_10'].item()
+        ma20 = latest['SMA_20'].item()
+        macd_val = latest['MACD'].item()
+        sig_val = latest['Signal'].item()
+        rsi = latest['RSI'].item()
+        
+        market_uptrend = check_market_trend()
+        
+        reasons = []
+        # 1. 系統性風險判定
+        if not market_uptrend:
+            reasons.append("📉 **大盤拖累**：加權指數跌破月線，市場覆巢之下無完卵，此筆停損屬於正確防守。")
+            
+        # 2. 均線與趨勢判定
+        if sell_price < ma20:
+            reasons.append("⚠️ **破底停損**：股價跌破月線(波段生命線)，技術面翻空，截斷虧損是明智之舉。")
+        elif sell_price < ma10 and ("1" in strat or "5" in strat):
+            reasons.append("⚠️ **動能消散**：動能策略跌破 10 日線，假突破或強勢慣性改變。")
+            
+        # 3. 指標判定
+        if macd_val < sig_val:
+            reasons.append("📉 **趨勢轉空**：MACD 出現死叉，買盤力道衰退。")
+        if rsi < 40:
+            reasons.append("🧊 **人氣退潮**：RSI 轉弱，陷入無量陰跌或恐慌殺盤。")
+            
+        # 4. 盲點檢討
+        if buy_price > ma10 and sell_price < ma10 and not market_uptrend:
+            reasons.append("💡 **AI 教練碎碎念**：大盤不佳時追高強勢股容易被洗。下次請耐心等待「縮量回踩」再進場。")
+            
+        if not reasons:
+            reasons.append("💡 **AI 教練碎碎念**：技術面無明顯嚴重破壞。此筆可能為正常震盪洗盤，或是個人資金調度/情緒性停損。")
+            
+        return "\n".join(reasons)
+    except Exception as e:
+        return f"分析失敗 ({e})"
 
 def run_evaluation(code):
     tickers_dict = get_all_taiwan_tickers() 
@@ -366,6 +429,8 @@ async def 指令(ctx):
     embed_cmd.add_field(name="🛡️ `!風控 [代號] [停利%] [停損%]`", value="隨時更新股票的停損停利點。\n*範例: `!風控 2330 20 10`*", inline=False)
     embed_cmd.add_field(name="⚙️ `!策略 [代號] [策略代號]`", value="修改持股的防護策略。\n*範例: `!策略 2330 4`*", inline=False)
     embed_cmd.add_field(name="🗑️ `!刪除 [代號]`", value="將股票從監控清單中移除。\n*範例: `!刪除 2330`*", inline=False)
+    embed_cmd.add_field(name="💸 `!賣出 [代號] [賣出價] [股數]`", value="結算交易並記錄損益(股數預設1000)。\n*範例: `!賣出 2330 850 1000`*", inline=False)
+    embed_cmd.add_field(name="🏆 `!績效`", value="查看歷史累積總損益與勝率，並調閱戰敗檢討。", inline=False)
     
     embed_strat = discord.Embed(
         title="📖 【五大量化策略】AI 雙重視角操盤邏輯",
@@ -477,6 +542,108 @@ async def 策略(ctx, code: str, strat_num: str):
         name = data[code].get('name', '')
         await ctx.send(f"✅ **{code} {name}** 策略已更新為: `{full_strat}`")
     else: await ctx.send(f"⚠️ 找不到代號 {code}。")
+
+@bot.command()
+async def 賣出(ctx, code: str, sell_price: float, shares: int = 1000):
+    """ 
+    賣出指令。預設股數為 1000 股 (1張)。
+    """
+    data = load_data()
+    if code not in data:
+        await ctx.send(f"⚠️ 老闆，你的監控清單裡找不到代號 **{code}** 的庫存記錄喔！")
+        return
+    
+    info = data[code]
+    buy_price = info.get('buy_price', 0)
+    name = info.get('name', '未知名稱')
+    strat = info.get('strategy', '無')
+    
+    pnl_amount = (sell_price - buy_price) * shares
+    pnl_pct = round(((sell_price - buy_price) / buy_price) * 100, 2) if buy_price > 0 else 0
+    
+    msg = await ctx.send(f"⏳ 正在結算 **{code} {name}** 交易，計算損益中...")
+    
+    history = load_history()
+    history['total_pnl'] += pnl_amount
+    
+    loss_reason = ""
+    if pnl_amount < 0:
+        await msg.edit(content=f"⏳ 正在結算 **{code} {name}**... 偵測到虧損，小秘書正在啟動 🩸AI戰敗檢討系統...")
+        loss_reason = await asyncio.to_thread(run_loss_analysis, code, name, buy_price, sell_price, strat)
+        
+    record = {
+        "date": datetime.now(timezone(timedelta(hours=8))).strftime('%Y-%m-%d %H:%M'),
+        "code": code,
+        "name": name,
+        "buy_price": buy_price,
+        "sell_price": sell_price,
+        "shares": shares,
+        "pnl": pnl_amount,
+        "pnl_pct": pnl_pct,
+        "strategy": strat,
+        "loss_reason": loss_reason
+    }
+    history['trades'].append(record)
+    save_history(history)
+    
+    del data[code]
+    save_data(data)
+    
+    embed = discord.Embed(
+        title=f"🤝 交易結算單：{code} {name}",
+        color=0xE74C3C if pnl_amount < 0 else 0x2ECC71 
+    )
+    embed.add_field(name="買入成本", value=f"`{buy_price}`", inline=True)
+    embed.add_field(name="賣出價格", value=f"`{sell_price}`", inline=True)
+    embed.add_field(name="交易股數", value=f"`{shares}` 股", inline=True)
+    
+    pnl_str = f"+{int(pnl_amount)}" if pnl_amount >= 0 else f"{int(pnl_amount)}"
+    pnl_pct_str = f"+{pnl_pct}%" if pnl_pct >= 0 else f"{pnl_pct}%"
+    embed.add_field(name="💵 單筆損益", value=f"**{pnl_str} 元** ({pnl_pct_str})", inline=False)
+    
+    total_pnl = history['total_pnl']
+    total_str = f"+{int(total_pnl)}" if total_pnl >= 0 else f"{int(total_pnl)}"
+    embed.add_field(name="🏦 累積總損益", value=f"**{total_str} 元**", inline=False)
+    
+    if loss_reason:
+        embed.add_field(name="🩸 AI 戰敗檢討報告", value=loss_reason, inline=False)
+        
+    await msg.edit(content=None, embed=embed)
+
+@bot.command()
+async def 績效(ctx):
+    """ 查詢累積總績效與近期虧損檢討 """
+    history = load_history()
+    total = history.get('total_pnl', 0)
+    trades = history.get('trades', [])
+    
+    if not trades:
+        await ctx.send("📊 目前還沒有任何已結算的交易紀錄喔！")
+        return
+        
+    win_count = sum(1 for t in trades if t['pnl'] >= 0)
+    loss_count = len(trades) - win_count
+    win_rate = round(win_count / len(trades) * 100, 1)
+    
+    embed = discord.Embed(
+        title="🏆 雲端小秘書 - 總體績效戰報",
+        color=0xF1C40F
+    )
+    total_str = f"+{int(total)}" if total >= 0 else f"{int(total)}"
+    embed.add_field(name="💵 累積總損益", value=f"**{total_str} 元**", inline=False)
+    embed.add_field(name="📊 交易數據", value=f"總筆數: `{len(trades)}` 筆\n獲利: `{win_count}` 筆 | 虧損: `{loss_count}` 筆\n勝率: `{win_rate}%`", inline=False)
+    
+    if loss_count > 0:
+        loss_trades = [t for t in trades if t['pnl'] < 0][-3:]
+        loss_text = ""
+        for t in loss_trades:
+            short_reason = t['loss_reason'].split('\n')[0] if t['loss_reason'] else "無"
+            loss_text += f"**{t['date']} | {t['code']} {t['name']}** (`{int(t['pnl'])}`元)\n👉 {short_reason}\n\n"
+        
+        if loss_text:
+            embed.add_field(name="🔍 近期戰敗紀錄摘要 (Top 3)", value=loss_text.strip(), inline=False)
+            
+    await ctx.send(embed=embed)
 
 async def start_web_server():
     app = web.Application()
