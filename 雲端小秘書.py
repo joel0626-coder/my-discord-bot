@@ -440,6 +440,7 @@ async def on_ready():
 # =====================================================================
 @bot.command(aliases=['help', '幫助'])
 async def 指令(ctx):
+    # 第一張卡片：操作指令面板
     embed_cmd = discord.Embed(
         title="🤖 雲端小秘書 - 指令大全",
         description="老闆，請隨時對我下達以下指令（格式內的 `[ ]` 請記得空一格）：",
@@ -447,15 +448,44 @@ async def 指令(ctx):
     )
     embed_cmd.add_field(name="🔍 `!健檢`", value="360度全方位掃描目前庫存狀態與帳面金額。", inline=False)
     embed_cmd.add_field(name="🔬 `!評估 [代號]`", value="個股 X 光機！幫你鑑定這檔股票是否符合買進策略。", inline=False)
-    embed_cmd.add_field(name="📥 `!新增 [代號] [均價] [股數] [策略] [名稱] [停利%] [停損%]`", value="將股票交給小秘書監控。\n*範例: `!新增 2330 800 2000 1` (買2張)*", inline=False)
+    embed_cmd.add_field(name="📥 `!新增 [代號] [均價] [股數] [策略] [名稱] [停利%] [停損%]`", value="將股票交給小秘書監控。\n*範例: `!新增 2330 800 2000 1`*", inline=False)
     embed_cmd.add_field(name="✏️ `!部位 [代號] [新均價] [新總股數]`", value="修正持股的成本價與總股數。\n*範例: `!部位 2330 820 3000`*", inline=False)
     embed_cmd.add_field(name="🛡️ `!風控 [代號] [停利%] [停損%]`", value="隨時更新股票的停損停利點。", inline=False)
     embed_cmd.add_field(name="⚙️ `!策略 [代號] [策略代號]`", value="修改持股的防護策略。", inline=False)
     embed_cmd.add_field(name="🗑️ `!刪除 [代號]`", value="將股票從監控清單中移除。", inline=False)
     embed_cmd.add_field(name="💸 `!賣出 [代號] [賣出價] [賣出股數]`", value="支援分批停利！股數留空則全數賣出。\n*範例: `!賣出 2330 850 1000`*", inline=False)
-    embed_cmd.add_field(name="🏆 `!績效 [YYYY-MM]`", value="查看總績效與月度績效明細。\n*範例: `!績效` 或 `!績效 2026-04`*", inline=False)
+    embed_cmd.add_field(name="🏆 `!績效 [YYYY-MM]`", value="查看總績效與月度明細。\n*範例: `!績效` 或 `!績效 2026-04`*", inline=False)
+    
+    # 第二張卡片：操盤策略心法 (白話文詳解)
+    embed_strat = discord.Embed(
+        title="📖 【五大量化策略】AI 雙重視角操盤邏輯",
+        description="系統會根據您選擇的策略，同時給予短線客與波段客的操作建議：",
+        color=0x3498DB
+    )
+    
+    embed_strat.add_field(
+        name="1️⃣ 布林壓縮突破 & 5️⃣ 強勢創高確認 (動能飆股)",
+        value="🟢 **為何買：** 股票盤整很久或突破壓力區，主力準備發車！\n🔴 **為何賣：** 飆車最怕熄火。\n👉 **短線客**：跌破「5日線」極強動能消散，立刻獲利了結。\n👉 **波段客**：跌破「10日線」代表假突破，減碼一半保本；跌破「月線」清倉。",
+        inline=False
+    )
+    embed_strat.add_field(
+        name="2️⃣ 雙均線 + MACD (波段大趨勢)",
+        value="🟢 **為何買：** 長線趨勢向上(站穩季線)，且 MACD 翻揚。代表短線整理結束，新一波漲勢啟動。\n🔴 **為何賣：** 波段結束。\n👉 **短線客**：MACD 紅柱連續縮減或死叉，代表沒力了，立刻出場。\n👉 **波段客**：不理會短線震盪，以「月線」作為最後防守底線。",
+        inline=False
+    )
+    embed_strat.add_field(
+        name="3️⃣ RSI 超賣反彈 (危機入市)",
+        value="🟢 **為何買：** 股價跌太深，散戶極度恐慌。當 RSI 重新勾起，代表殺盤力道竭盡，進場搶反彈。\n🔴 **為何賣：** 搶反彈有賺就跑。\n👉 **停利**：RSI 衝上 70 後反轉向下時。\n👉 **停損**：反彈失敗又跌破月線 3% 以上，立刻停損。",
+        inline=False
+    )
+    embed_strat.add_field(
+        name="4️⃣ 多頭縮量回踩 (高勝率防守)",
+        value="🟢 **為何買：** 好股票跌到月線附近，且「成交量極度萎縮」。代表散戶被洗掉但主力沒跑。\n🔴 **為何賣：** 買在支撐就不能破支撐！\n👉 **短線客**：跌破月線即嚴格停損出場。\n👉 **波段客**：進入 3% 主力洗盤緩衝區觀察，若跌破月線 3% 毫無懸念立刻砍倉。",
+        inline=False
+    )
     
     await ctx.send(embed=embed_cmd)
+    await ctx.send(embed=embed_strat)
 
 @bot.command()
 async def 評估(ctx, code: str):
