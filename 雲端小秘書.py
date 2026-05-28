@@ -21,6 +21,10 @@ logging.getLogger('yfinance').setLevel(logging.CRITICAL)
 TOKEN = os.environ.get('DISCORD_TOKEN')
 FINMIND_TOKEN = os.environ.get('FINMIND_TOKEN', "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJ1c2VyX2lkIjoiam9lbDA2MjYiLCJlbWFpbCI6ImpvZWwwNjI2QG1zbi5jb20iLCJ0b2tlbl92ZXJzaW9uIjowfQ.j1KeK6JfXNUX2WlEKYmdMctQV_9_xfwpzVlANplYafs")
 
+# 📱 新增：LINE 推播金鑰設定
+LINE_CHANNEL_TOKEN = "/Gpijj0GFMEc4+HVftK5h6CY24k4ouG2YFRa4JUzCW+R3b/A9gcNQwbXTISw99Q5Ts19fsOG4iYqi2d0w1a7mjfyp4iK0e5CMOAr33BV22XIM9bxD09zr8UchDBIL0ToX94DhZNh00uIwp1+4SV81gdB04t89/1O/w1cDnyilFU="
+LINE_USER_ID = "Uc63b8db70b36f7186237abd9c4c6b8df"
+
 PORTFOLIO_FILE = "my_portfolio.json"
 TRADE_HISTORY_FILE = "trade_history.json"
 CONFIG_FILE = "config.json"
@@ -67,6 +71,33 @@ def load_history():
 def save_history(data):
     with open(TRADE_HISTORY_FILE, 'w', encoding='utf-8') as f: 
         json.dump(data, f, indent=4, ensure_ascii=False)
+
+# =====================================================================
+# 📱 LINE 推播引擎
+# =====================================================================
+def send_line_message(chunks):
+    """ 負責將切好的訊息片段推送至 LINE """
+    if not LINE_CHANNEL_TOKEN or not LINE_USER_ID:
+        return
+        
+    url = 'https://api.line.me/v2/bot/message/push'
+    headers = {
+        'Content-Type': 'application/json',
+        'Authorization': f'Bearer {LINE_CHANNEL_TOKEN}'
+    }
+    
+    # LINE API 限制每次發送最多只能包含 5 個對話泡泡 (messages)
+    for i in range(0, len(chunks), 5):
+        batch = chunks[i:i+5]
+        messages = [{'type': 'text', 'text': text} for text in batch]
+        data = {
+            'to': LINE_USER_ID,
+            'messages': messages
+        }
+        try:
+            requests.post(url, headers=headers, json=data)
+        except Exception as e:
+            print(f"LINE 推播失敗: {e}")
 
 # =====================================================================
 # 📚 FinMind 股票代號快取
@@ -591,6 +622,8 @@ def run_health_check():
                     msg_15 = "🤔 [破5日線] 短線強勢慣性改變，建議部分獲利了結。"
                 elif bb_pass: msg_15 = "🎯 [突破發動] 帶量突破上軌，動能攻擊中！"
                 elif breakout_pass: msg_15 = "🎯 [創高發動] 帶量突破近一月新高，強勢上攻！"
+                elif "1" in strat and bb_upper and close < bb_upper and prev['Close'].item() > prev['BB_Upper'].item():
+                    msg_15 = "💡 [回落通道] 漲多休息，進入高檔震盪。"
                 else: msg_15 = "🚀 [強勢多頭] 延續上攻慣性，緊抱！"
 
                 msg_2 = ""
@@ -708,24 +741,28 @@ async def auto_report():
     current_time = now.time()
     
     if time(hour=9, minute=30) <= current_time <= time(hour=14, minute=0):
+        result = await asyncio.to_thread(run_health_check)
+        full_msg = f"🔔 **【盤中即時監控】{now.strftime('%H:%M')} 戰報**\n{result}"
+        
+        chunks = []
+        current_chunk = ""
+        for line in full_msg.split('\n'):
+            if len(current_chunk) + len(line) + 1 > 1900:
+                chunks.append(current_chunk)
+                current_chunk = line + "\n"
+            else:
+                current_chunk += line + "\n"
+        if current_chunk:
+            chunks.append(current_chunk)
+            
+        # 1. 執行 Discord 推播
         channel = bot.get_channel(PUSH_CHANNEL_ID)
         if channel:
-            result = await asyncio.to_thread(run_health_check)
-            full_msg = f"🔔 **【盤中即時監控】{now.strftime('%H:%M')} 戰報**\n{result}"
-            
-            chunks = []
-            current_chunk = ""
-            for line in full_msg.split('\n'):
-                if len(current_chunk) + len(line) + 1 > 1900:
-                    chunks.append(current_chunk)
-                    current_chunk = line + "\n"
-                else:
-                    current_chunk += line + "\n"
-            if current_chunk:
-                chunks.append(current_chunk)
-                
             for chunk in chunks:
                 await channel.send(chunk)
+                
+        # 2. 執行 LINE 雙棲推播 (新增部分)
+        await asyncio.to_thread(send_line_message, chunks)
 
 @bot.event
 async def on_ready():
