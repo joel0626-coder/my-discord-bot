@@ -519,12 +519,41 @@ async def 新增(ctx, code: str, price: float, shares: int, strat_num: str, name
             
     full_strat = STRAT_MAP.get(strat_num, strat_num) 
     data = load_data()
+    
+    # 💡 自動加碼/攤平 計算邏輯
+    is_addon = False
+    old_shares = 0
+    old_price = 0
+    
+    if code in data:
+        is_addon = True
+        old_shares = data[code].get('shares', 1000)
+        old_price = data[code].get('buy_price', 0)
+        
+        # 計算新均價：(舊總金額 + 新總金額) / 新總股數
+        total_cost = (old_price * old_shares) + (price * shares)
+        new_total_shares = old_shares + shares
+        new_avg_price = round(total_cost / new_total_shares, 2)
+        
+        # 更新變數準備存檔
+        price = new_avg_price
+        shares = new_total_shares
+        
+        # 如果這次沒填寫停損停利，則沿用舊的設定
+        if tp is None: tp = data[code].get('tp_pct')
+        if sl is None: sl = data[code].get('sl_pct')
+
     data[code] = {"buy_price": price, "shares": shares, "strategy": full_strat, "name": name, "tp_pct": tp, "sl_pct": sl}
     save_data(data)
     
     display_title = f"{code} {name}".strip()
     风控文 = f" | 停利: +{tp}% 停損: -{sl}%" if (tp or sl) else " | 未設定風控"
-    await ctx.send(f"✅ 已新增 **{display_title}**\n總投入: `{int(price*shares):,}` (均價 {price} x {shares}股)\n策略: `{full_strat}`{风控文}")
+    
+    # 依據是「新買」還是「加碼」回傳不同訊息
+    if is_addon:
+        await ctx.send(f"🔄 已自動為 **{display_title}** 執行【加碼/攤平】計算！\n加碼前: 均價 `{old_price}` ({old_shares:,} 股)\n新均價: `{price}` (總計 `{shares:,}` 股)\n當前策略: `{full_strat}`{风控文}")
+    else:
+        await ctx.send(f"✅ 已新增 **{display_title}**\n總投入: `{int(price*shares):,}` (均價 {price} x {shares:,} 股)\n策略: `{full_strat}`{风控文}")
 
 # 💡 全新部位校正指令 (取代 !成本)
 @bot.command()
