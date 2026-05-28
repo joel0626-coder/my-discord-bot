@@ -885,6 +885,36 @@ async def 庫存(ctx):
         await msg.edit(content=f"❌ 查詢過程發生系統錯誤: `{str(e)}`")
 
 @bot.command()
+async def 測試LINE(ctx):
+    msg = await ctx.send("⏳ 正在嘗試連線 LINE 伺服器並發送測試訊息...")
+    try:
+        # 1. 先發送簡單的連線確認
+        test_msg = ["👋 老闆好！這是一條測試訊息。\n如果您看到這行字，代表您的 LINE 雙棲推播系統已經【完美連線】啦！🎉"]
+        await asyncio.to_thread(send_line_message, test_msg)
+        
+        # 2. 順便把現在的庫存戰報推過去給你看看排版
+        result = await asyncio.to_thread(run_health_check)
+        full_msg = f"🔔 **【強制手動推播測試】**\n{result}"
+        
+        chunks = []
+        current_chunk = ""
+        for line in full_msg.split('\n'):
+            if len(current_chunk) + len(line) + 1 > 1900:
+                chunks.append(current_chunk)
+                current_chunk = line + "\n"
+            else:
+                current_chunk += line + "\n"
+        if current_chunk:
+            chunks.append(current_chunk)
+            
+        await asyncio.to_thread(send_line_message, chunks)
+        
+        await msg.edit(content="✅ **測試完畢！** 已經將測試訊號發送出去了，老闆快去檢查您的 LINE 有沒有「叮咚」！")
+        
+    except Exception as e:
+        await msg.edit(content=f"❌ **發送失敗！** 系統回報錯誤: `{str(e)}`")
+
+@bot.command()
 async def 分析(ctx, code: str):
     msg = await ctx.send(f"⏳ 正在調閱 `{code}` 的技術線圖與三大法人籌碼，撰寫 AI 深度健檢報告...")
     try:
