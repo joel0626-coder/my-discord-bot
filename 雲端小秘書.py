@@ -21,6 +21,7 @@ FINMIND_TOKEN = os.environ.get('FINMIND_TOKEN', "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI
 
 PORTFOLIO_FILE = "my_portfolio.json"
 TRADE_HISTORY_FILE = "trade_history.json"
+CONFIG_FILE = "config.json"  # 💡 新增設定檔，用來存本金
 
 # ========= 🚨 你的專屬設定 =========
 PUSH_CHANNEL_ID = 1509058179458404495
@@ -37,6 +38,15 @@ STRAT_MAP = {
 # =====================================================================
 # 🗂️ 資料庫存取模組
 # =====================================================================
+def load_config():
+    if not os.path.exists(CONFIG_FILE): return {"total_capital": 0}
+    with open(CONFIG_FILE, 'r', encoding='utf-8') as f: 
+        return json.load(f)
+
+def save_config(data):
+    with open(CONFIG_FILE, 'w', encoding='utf-8') as f: 
+        json.dump(data, f, indent=4, ensure_ascii=False)
+
 def load_data():
     if not os.path.exists(PORTFOLIO_FILE): return {}
     with open(PORTFOLIO_FILE, 'r', encoding='utf-8') as f: 
@@ -251,11 +261,25 @@ def run_evaluation(code):
             if pullback_pass: matched_strats.append("策略4")
             if breakout_pass: matched_strats.append("策略5")
             
+            # 💡 載入本金，提供精準股數建議
+            config = load_config()
+            base_capital = config.get('total_capital', 0)
+            history = load_history()
+            history_pnl = history.get('total_pnl', 0)
+            proxy_equity = base_capital + history_pnl
+            
             risk_pct = round(((close - ma20) / close) * 100, 2)
             if risk_pct > 0:
                 suggested_alloc = round((2.0 / risk_pct) * 100, 1) 
                 if suggested_alloc > 100: suggested_alloc = 100
-                risk_advice = f"⚖️ **資金控管建議**：目前距離月線停損約 `-{risk_pct}%`。若嚴守單筆虧損不超過總資金2%之紀律，本檔建議最多投入總資金的 **`{suggested_alloc}%`**。\n"
+                
+                if proxy_equity > 0:
+                    max_loss_amt = int(proxy_equity * 0.02)
+                    suggested_amt = int(proxy_equity * (suggested_alloc / 100))
+                    suggested_shares = int(suggested_amt / close)
+                    risk_advice = f"⚖️ **資金控管建議**：目前距離月線停損約 `-{risk_pct}%`。\n   👉 單筆風險上限 (2%)：約 `{max_loss_amt:,}` 元\n   👉 建議投入上限 ({suggested_alloc}%)：約 `{suggested_amt:,}` 元 (可買約 `{suggested_shares:,}` 股)\n"
+                else:
+                    risk_advice = f"⚖️ **資金控管建議**：目前距離月線停損約 `-{risk_pct}%`。若嚴守單筆虧損不超過總資金2%之紀律，建議最多投入總資金的 **`{suggested_alloc}%`**。\n"
             else:
                 risk_advice = f"⚖️ **資金控管建議**：目前股價已在月線之下，若進場屬於左側摸底，請極度縮小部位。\n"
             
@@ -274,10 +298,15 @@ def run_health_check():
     market_uptrend = check_market_trend()
     tickers_dict = get_all_taiwan_tickers() 
     
-    msg = "📊 **【雲端精準監控戰報】(360度攻守一體版)**\n"
-    if not market_uptrend:
-        msg += "⚠️ **[大盤警示]** 加權指數跌破月線，系統已自動關閉「動能與突破」攻擊判定！\n"
-    msg += "=========================\n"
+    # 💡 載入本金與歷史數據
+    config = load_config()
+    base_capital = config.get('total_capital', 0)
+    history = load_history()
+    history_pnl = history.get('total_pnl', 0)
+    
+    total_cost_of_holdings = 0
+    total_market_value = 0
+    stock_messages = []
     
     for code, info in portfolio.items():
         exact_ticker = f"{code}.TW"
@@ -293,7 +322,7 @@ def run_health_check():
             display_title = f"{code} {stock_name}".strip()
             
             if df.empty or len(df) <= 30:
-                msg += f"❌ **{display_title}**: 報價抓取失敗\n\n"
+                stock_messages.append(f"❌ **{display_title}**: 報價抓取失敗\n\n")
                 continue
                 
             df = calculate_indicators(df)
@@ -307,9 +336,13 @@ def run_health_check():
             
             cost = info.get('buy_price', 0)
             shares = info.get('shares', 1000)
-            total_cost = int(round(cost * shares))
-            current_value = int(round(close * shares))
-            profit_amount = current_value - total_cost
+            
+            item_cost = int(round(cost * shares))
+            item_value = int(round(close * shares))
+            total_cost_of_holdings += item_cost
+            total_market_value += item_value
+            
+            profit_amount = item_value - item_cost
             profit_pct = round(((close - cost) / cost) * 100, 2) if cost > 0 else 0
             
             strat = info.get('strategy', '無')
@@ -363,24 +396,24 @@ def run_health_check():
 
                 # 2. 波段趨勢
                 msg_2 = ""
-                if close < ma20: msg_2 = "🚨 [破月線] 趨勢防守底線遭貫破，建議清倉！"
+                if close < ma20: msg_2 = "🚨 [破月線] 趨勢防守底遭貫破，清倉！"
                 elif macd_val < sig_val: msg_2 = "⚠️ [MACD死叉] 短線出場；波段考慮減碼。"
                 elif hist_val < prev_hist < df.iloc[-3]['MACD_Hist'].item(): msg_2 = "🤔 [紅柱連縮] 短線準備落跑；波段續抱。"
-                elif macd_pass: msg_2 = "🎯 [趨勢發動] MACD多頭發散，新波段攻擊中！"
+                elif macd_pass: msg_2 = "🎯 [趨勢發動] MACD多頭發散，新波段攻擊！"
                 else: msg_2 = "🌊 [波段健康] 趨勢向上無虞。"
 
                 # 3. 逆勢反彈
                 msg_3 = ""
                 if close < ma20 * 0.97: msg_3 = "🚨 [破底] 跌破月線3%，反彈徹底失敗，停損！"
-                elif rsi_val < prev_rsi and prev_rsi > 70: msg_3 = "💰 [高檔反轉] 短線全數停利；波段分批減碼。"
+                elif rsi_val < prev_rsi and prev_rsi > 70: msg_3 = "💰 [高檔反轉] 短線停利；波段分批減碼。"
                 elif rsi_pass: msg_3 = "🎯 [抄底發動] 跌破超賣區後翻揚，反彈確立！"
                 else: msg_3 = f"🎣 [RSI {round(rsi_val, 1)}] 處於反彈或震盪週期。"
 
                 # 4. 支撐防守
                 msg_4 = ""
                 if close < ma20 * 0.97: msg_4 = "🚨 [防守貫破] 跌穿3%主力洗盤區，毫無懸念停損！"
-                elif close < ma20: msg_4 = "⚠️ [支撐測試] 跌破月線，進入3%洗盤緩衝區，密切觀察。"
-                elif pullback_pass: msg_4 = "🎯 [回踩發動] 縮量回測月線有守，絕佳防守加碼點！"
+                elif close < ma20: msg_4 = "⚠️ [支撐測試] 跌破月線，進入3%洗盤區，密切觀察。"
+                elif pullback_pass: msg_4 = "🎯 [回踩發動] 縮量回測月線有守，防守加碼點！"
                 else: msg_4 = "🛡️ [月線有守] 支撐強勁，安全續抱。"
 
                 s15_label = "🔥 動能/創高" + (" (★)" if is_s15 else "")
@@ -400,15 +433,38 @@ def run_health_check():
             tp_sl_info = f" | 停利: `+{tp_pct}%` 停損: `-{sl_pct}%`" if (tp_pct or sl_pct) else " | 風控: `未設定`"
             pnl_amt_str = f"+{profit_amount:,}" if profit_amount >= 0 else f"{profit_amount:,}"
             
-            msg += f"📌 **{display_title}**\n"
-            msg += f"   市價: `{close}` | 均價: `{cost}` | 股數: `{shares:,}` 股\n"
-            msg += f"   總成本: `{total_cost:,}` | 總市值: `{current_value:,}`\n"
-            msg += f"   帳面損益: **{pnl_amt_str}** (`{profit_pct}%`){tp_sl_info}\n"
-            msg += f"   策略: `{strat}`\n{panel_str}\n=========================\n"
-        except Exception as e:
-            msg += f"❌ **{code} {info.get('name', '')}**: 運算錯誤 ({e})\n\n"
+            s_msg = f"📌 **{display_title}**\n"
+            s_msg += f"   市價: `{close}` | 均價: `{cost}` | 股數: `{shares:,}` 股\n"
+            s_msg += f"   總成本: `{item_cost:,}` | 總市值: `{item_value:,}`\n"
+            s_msg += f"   帳面損益: **{pnl_amt_str}** (`{profit_pct}%`){tp_sl_info}\n"
+            s_msg += f"   策略: `{strat}`\n{panel_str}\n=========================\n"
+            stock_messages.append(s_msg)
             
-    return msg
+        except Exception as e:
+            stock_messages.append(f"❌ **{code} {info.get('name', '')}**: 運算錯誤 ({e})\n\n")
+
+    # 💡 組合出完整的儀表板
+    header_msg = "📊 **【雲端精準監控戰報】(V7 法人級部位控管版)**\n"
+    if not market_uptrend:
+        header_msg += "⚠️ **[大盤警示]** 加權指數跌破月線，系統已自動關閉攻擊判定！\n"
+    header_msg += "=========================\n"
+    
+    if base_capital > 0:
+        current_cash = base_capital + history_pnl - total_cost_of_holdings
+        total_equity = current_cash + total_market_value
+        position_level = round((total_market_value / total_equity) * 100, 1) if total_equity > 0 else 0
+        unrealized_pnl = total_market_value - total_cost_of_holdings
+        unrealized_pct = round((unrealized_pnl / total_cost_of_holdings) * 100, 2) if total_cost_of_holdings > 0 else 0
+        
+        pnl_sign = "+" if unrealized_pnl >= 0 else ""
+        header_msg += f"🏦 **帳戶總權益**: `{int(total_equity):,}` 元\n"
+        header_msg += f"💵 **可用現金**: `{int(current_cash):,}` 元 | 📦 **股票市值**: `{int(total_market_value):,}` 元\n"
+        header_msg += f"📈 **未實現損益**: `{pnl_sign}{int(unrealized_pnl):,}` 元 (`{pnl_sign}{unrealized_pct}%`)\n"
+        header_msg += f"⚖️ **持股水位**: `{position_level}%`\n"
+        header_msg += "=========================\n"
+        
+    full_msg = header_msg + "".join(stock_messages)
+    return full_msg
 
 # =====================================================================
 # 🤖 Discord 機器人主程式
@@ -460,10 +516,11 @@ async def 指令(ctx):
         description="老闆，請隨時對我下達以下指令（格式內的 `[ ]` 請記得空一格）：",
         color=0x2ECC71
     )
-    embed_cmd.add_field(name="🔍 `!健檢`", value="360度全方位掃描目前庫存狀態與帳面金額。", inline=False)
-    embed_cmd.add_field(name="🔬 `!評估 [代號]`", value="個股 X 光機！幫你鑑定這檔股票是否符合買進策略。", inline=False)
+    embed_cmd.add_field(name="🏦 `!本金 [金額]`", value="設定初始帳戶總資金，解鎖法人級儀表板。\n*範例: `!本金 1000000`*", inline=False)
+    embed_cmd.add_field(name="🔍 `!健檢`", value="360度全方位掃描目前庫存狀態與帳戶總權益。", inline=False)
+    embed_cmd.add_field(name="🔬 `!評估 [代號]`", value="個股 X 光機！自動依據本金換算建議買進股數。", inline=False)
     embed_cmd.add_field(name="📥 `!新增 [代號] [均價] [股數] [策略] [停利%] [停損%]`", value="將股票交給小秘書監控 (名稱全自動抓取)。\n*範例: `!新增 2330 800 2000 1` (買2張)*", inline=False)
-    embed_cmd.add_field(name="✏️ `!部位 [代號] [新均價] [新總股數]`", value="修正持股的成本價與總股數。\n*範例: `!部位 2330 820 3000`*", inline=False)
+    embed_cmd.add_field(name="✏️ `!部位 [代號] [新均價] [新總股數]`", value="手動校正持股的成本價與總股數。\n*範例: `!部位 2330 820 3000`*", inline=False)
     embed_cmd.add_field(name="🛡️ `!風控 [代號] [停利%] [停損%]`", value="隨時更新股票的停損停利點。", inline=False)
     embed_cmd.add_field(name="⚙️ `!策略 [代號] [策略代號]`", value="修改持股的防護策略。", inline=False)
     embed_cmd.add_field(name="🏷️ `!命名 [代號] [名稱]`", value="手動為股票正名 (若系統未抓到時使用)。", inline=False)
@@ -502,8 +559,15 @@ async def 指令(ctx):
     await ctx.send(embed=embed_strat)
 
 @bot.command()
+async def 本金(ctx, amount: float):
+    config = load_config()
+    config['total_capital'] = amount
+    save_config(config)
+    await ctx.send(f"✅ 初始本金已成功設定為: `{int(amount):,}` 元！\n系統將自動結合您的「歷史實現損益」來精準計算您的即時可用現金與帳戶總權益。")
+
+@bot.command()
 async def 評估(ctx, code: str):
-    msg = await ctx.send(f"⏳ 正在調閱 `{code}` 的技術線圖，啟動量化打擊區與大盤濾網分析...")
+    msg = await ctx.send(f"⏳ 正在調閱 `{code}` 的技術線圖，啟動量化打擊區與資金模型分析...")
     try:
         result = await asyncio.wait_for(asyncio.to_thread(run_evaluation, code), timeout=30.0)
         await msg.edit(content=result)
