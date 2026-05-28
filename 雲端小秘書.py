@@ -122,7 +122,6 @@ def calculate_indicators(df):
     return df
 
 def check_market_trend():
-    """ 檢查大盤 (台灣加權指數) 是否站上月線，作為多空環境濾網 """
     try:
         twii = yf.download('^TWII', period="2mo", progress=False)
         if twii.empty: return True 
@@ -135,7 +134,6 @@ def check_market_trend():
         return True
 
 def run_loss_analysis(code, name, buy_price, sell_price, strat):
-    """ 🩸 AI 戰敗檢討系統：分析虧損原因 """
     tickers_dict = get_all_taiwan_tickers()
     exact_ticker = f"{code}.TW" if f"{code}.TW" in tickers_dict else f"{code}.TWO"
     
@@ -153,30 +151,23 @@ def run_loss_analysis(code, name, buy_price, sell_price, strat):
         rsi = latest['RSI'].item()
         
         market_uptrend = check_market_trend()
-        
         reasons = []
-        # 1. 系統性風險判定
+        
         if not market_uptrend:
-            reasons.append("📉 **大盤拖累**：加權指數跌破月線，市場覆巢之下無完卵，此筆停損屬於正確防守。")
-            
-        # 2. 均線與趨勢判定
+            reasons.append("📉 **大盤拖累**：加權指數跌破月線，覆巢之下無完卵，此筆屬於正確防守。")
         if sell_price < ma20:
-            reasons.append("⚠️ **破底停損**：股價跌破月線(波段生命線)，技術面翻空，截斷虧損是明智之舉。")
+            reasons.append("⚠️ **破底停損**：股價跌破月線(波段生命線)，技術面翻空。")
         elif sell_price < ma10 and ("1" in strat or "5" in strat):
-            reasons.append("⚠️ **動能消散**：動能策略跌破 10 日線，假突破或強勢慣性改變。")
-            
-        # 3. 指標判定
+            reasons.append("⚠️ **動能消散**：動能策略跌破 10 日線，強勢慣性改變。")
         if macd_val < sig_val:
             reasons.append("📉 **趨勢轉空**：MACD 出現死叉，買盤力道衰退。")
         if rsi < 40:
-            reasons.append("🧊 **人氣退潮**：RSI 轉弱，陷入無量陰跌或恐慌殺盤。")
-            
-        # 4. 盲點檢討
+            reasons.append("🧊 **人氣退潮**：RSI 轉弱，陷入無量陰跌。")
         if buy_price > ma10 and sell_price < ma10 and not market_uptrend:
-            reasons.append("💡 **AI 教練碎碎念**：大盤不佳時追高強勢股容易被洗。下次請耐心等待「縮量回踩」再進場。")
+            reasons.append("💡 **AI 教練碎碎念**：大盤不佳時追高強勢股容易被洗，下次請等「縮量回踩」。")
             
         if not reasons:
-            reasons.append("💡 **AI 教練碎碎念**：技術面無明顯嚴重破壞。此筆可能為正常震盪洗盤，或是個人資金調度/情緒性停損。")
+            reasons.append("💡 **AI 教練碎碎念**：技術面無明顯嚴重破壞。此筆可能為洗盤或個人資金調度。")
             
         return "\n".join(reasons)
     except Exception as e:
@@ -208,10 +199,8 @@ def run_evaluation(code):
         low = round(latest['Low'].item(), 2)
         vol = latest['Volume'].item()
         open_px = latest['Open'].item()
-        
         ma20 = round(latest['SMA_20'].item(), 2)
         ma60 = round(latest['SMA_60'].item(), 2)
-        
         vol_5ma = latest['Vol_5MA'].item()
         bb_width = prev1['BB_Width'].item()
         macd, sig = latest['MACD'].item(), latest['Signal'].item()
@@ -219,24 +208,20 @@ def run_evaluation(code):
         rsi = latest['RSI'].item()
         prev_rsi = prev1['RSI'].item()
         max20_prev = prev1['Max_20'].item()
-        
         is_uptrend = latest['SMA_60'].item() > prev1['SMA_60'].item()
         
-        # ==== 策略條件審查 (進場寬鬆化) ====
         bb_pass = (bb_width < 0.10) and (close > latest['BB_Upper'].item()) and (vol > (vol_5ma * 1.5)) and is_uptrend and (close > open_px)
         macd_pass = is_uptrend and (close > ma60) and (macd > sig) and (macd > prev_macd)
         rsi_pass = (close < ma20) and (prev_rsi < 35) and (rsi >= 30) and (rsi > prev_rsi)
         pullback_pass = is_uptrend and (close > ma60) and (low <= ma20 * 1.03) and (close >= ma20) and (vol < vol_5ma)
         breakout_pass = is_uptrend and (ma20 > ma60) and (close >= max20_prev) and (vol > vol_5ma * 1.2)
 
-        # 🚨 大盤濾網介入
         market_warning = ""
         if not market_uptrend:
             bb_pass = False
             breakout_pass = False
             market_warning = "⚠️ **[大盤警示]** 台灣加權指數目前跌破月線，系統已強制關閉「布林突破」與「強勢創高」策略，防禦假突破風險！\n"
 
-        # ==== 產生評估報告 ====
         msg = f"🔬 **【個股 X 光機評估報告】**\n"
         msg += f"📌 **{code} {stock_name}** | 最新收盤價: `{close}`\n"
         msg += f"📊 基準: 月線 `{ma20}` | 季線 `{ma60}`\n"
@@ -264,7 +249,6 @@ def run_evaluation(code):
             if pullback_pass: matched_strats.append("策略4")
             if breakout_pass: matched_strats.append("策略5")
             
-            # 資金控管建議
             risk_pct = round(((close - ma20) / close) * 100, 2)
             if risk_pct > 0:
                 suggested_alloc = round((2.0 / risk_pct) * 100, 1) 
@@ -275,18 +259,19 @@ def run_evaluation(code):
             
             msg += f"💡 **【AI 教練結論】: 建議買進！**\n🔥 該股目前符合 **{', '.join(matched_strats)}** 的發動訊號。\n{risk_advice}若決定進場，請用 `!新增 {code} {close} {matched_strats[0][-1]}` 加入小秘書監控！"
         else:
-            msg += f"💡 **【AI 教練結論】: 建議觀望 👀**\n這檔股票目前技術面**並未觸發**任何高勝率或動能攻擊條件。不要急著把資金卡在沒有表態的股票上，請多看少做！"
+            msg += f"💡 **【AI 教練結論】: 建議觀望 👀**\n這檔股票目前技術面**並未觸發**任何高勝率或動能攻擊條件。請多看少做！"
             
         return msg
     except Exception as e:
         return f"❌ 評估過程發生錯誤: `{e}`"
 
+# 🔥 全新升級：360度全方位健檢面板
 def run_health_check():
     portfolio = load_data()
     if not portfolio: return "⚠️ 資料庫為空，請用 `!新增` 指令建立股票。不知道怎麼用請輸入 `!指令`"
     
     tickers_dict = get_all_taiwan_tickers() 
-    msg = "📊 **【雲端精準監控戰報】**\n=========================\n"
+    msg = "📊 **【雲端精準監控戰報】(360度視角版)**\n=========================\n"
     
     for code, info in portfolio.items():
         exact_ticker = f"{code}.TW"
@@ -295,7 +280,6 @@ def run_health_check():
         
         try:
             df = yf.download(exact_ticker, period="3mo", progress=False)
-            # 自動補齊名稱
             stock_name = info.get('name', '')
             if not stock_name and exact_ticker in tickers_dict:
                 stock_name = tickers_dict[exact_ticker]['name']
@@ -310,79 +294,83 @@ def run_health_check():
             latest = df.iloc[-1]
             prev = df.iloc[-2]
             
-            close = latest['Close'].item()
+            close = round(latest['Close'].item(), 2)
             cost = info.get('buy_price', 0)
             strat = info.get('strategy', '無')
             profit = round(((close - cost) / cost) * 100, 2) if cost > 0 else 0
             
             tp_pct, sl_pct = info.get('tp_pct', None), info.get('sl_pct', None)
-            ma5, ma10, ma20 = latest['SMA_5'].item(), latest['SMA_10'].item(), latest['SMA_20'].item()
+            ma5, ma10, ma20 = round(latest['SMA_5'].item(), 2), round(latest['SMA_10'].item(), 2), round(latest['SMA_20'].item(), 2)
             bb_upper = latest['BB_Upper'].item()
             macd_val, sig_val = latest['MACD'].item(), latest['Signal'].item()
             hist_val, prev_hist = latest['MACD_Hist'].item(), prev['MACD_Hist'].item()
             rsi_val, prev_rsi = latest['RSI'].item(), prev['RSI'].item()
             
-            macd_status = "✅ 多頭" if macd_val > sig_val else "⚠️ 空頭"
+            alert_msg = ""
             
-            custom_panel, alert_msg = "", ""
+            # 優先判定：自訂停損停利點
+            if tp_pct and profit >= float(tp_pct): alert_msg = f"💰 [已達停利點] 報酬率 {profit}% (+{tp_pct}%)！"
+            elif sl_pct and profit <= -float(sl_pct): alert_msg = f"🛑 [已達停損點] 報酬率 {profit}% (-{sl_pct}%)！"
             
-            # 第一層防線：自訂停損停利點
-            if tp_pct and profit >= float(tp_pct): alert_msg = f"💰 [獲利出場] 報酬率 {profit}% 已達停利點 (+{tp_pct}%)！"
-            elif sl_pct and profit <= -float(sl_pct): alert_msg = f"🛑 [落跑停損] 報酬率 {profit}% 已達停損點 (-{sl_pct}%)！"
-                
-            if not alert_msg:
+            panel_str = ""
+            if alert_msg:
+                panel_str = f"   👉 {alert_msg}"
+            else:
                 # ==========================================
-                # 🔥 第二層防線：【AI 教練綜合建議】(雙重視角)
+                # 🔥 AI 360 度全策略診斷系統
                 # ==========================================
+                is_s15 = "1" in strat or "布林" in strat or "5" in strat or "創高" in strat
+                is_s2 = "2" in strat or "MACD" in strat
+                is_s3 = "3" in strat or "RSI" in strat
+                is_s4 = "4" in strat or "回踩" in strat
                 
-                # 策略 1 (布林) & 策略 5 (創高) - 動能突破系
-                if "1" in strat or "布林" in strat or "5" in strat or "創高" in strat:
-                    custom_panel = f"5日線 `{round(ma5, 2)}` | 10日線 `{round(ma10, 2)}` | 月線 `{round(ma20, 2)}`"
-                    if close < ma20: 
-                        alert_msg = "🚨 [防守貫破] 已跌破月線，強勢慣性已被徹底破壞，無論長短線皆建議清倉！"
-                    elif close < ma10: 
-                        alert_msg = "⚠️ [轉弱/洗盤] 跌破 10 日線。\n      👉 **短線客**：強烈建議出場。\n      👉 **波段客**：建議先減碼一半保本，剩餘用月線防守。"
-                    elif close < ma5: 
-                        alert_msg = "🤔 [動能衰退] 跌破 5 日線。\n      👉 **短線客**：建議獲利了結，有賺就跑。\n      👉 **波段客**：視為正常洗盤，可續抱觀察。"
-                    elif "1" in strat and bb_upper and close < bb_upper and prev['Close'].item() > prev['BB_Upper'].item(): 
-                        alert_msg = "💡 [漲多休息] 跌回布林通道內，進入高檔震盪。"
-                
-                # 策略 2 (MACD趨勢) - 波段趨勢系
-                elif "2" in strat or "MACD" in strat:
-                    custom_panel = f"MACD: `{macd_status}` | 10日線 `{round(ma10, 2)}` | 月線 `{round(ma20, 2)}`"
-                    if close < ma20:
-                        alert_msg = "🚨 [趨勢破壞] 跌破月線，波段防守底線遭貫破，建議清倉！"
-                    elif macd_val < sig_val: 
-                        alert_msg = "⚠️ [MACD死叉] 波段轉弱。\n      👉 **短線客**：立刻出場。\n      👉 **波段客**：可考慮減碼，剩餘部位觀察月線支撐。"
-                    elif hist_val < prev_hist < df.iloc[-3]['MACD_Hist'].item():
-                        alert_msg = "🤔 [動能衰退] MACD 紅柱連續縮減。\n      👉 **短線客**：準備落跑。\n      👉 **波段客**：無須理會小波動，續抱。"
-                
-                # 策略 3 (RSI反彈) - 逆勢抄底系
-                elif "3" in strat or "RSI" in strat:
-                    custom_panel = f"RSI: `{round(rsi_val, 2)}` | 月線 `{round(ma20, 2)}`"
-                    if close < ma20 * 0.97: 
-                        alert_msg = "🚨 [破底] 跌破月線超過 3%，反彈徹底失敗，立刻停損！"
-                    elif rsi_val < prev_rsi and prev_rsi > 70: 
-                        alert_msg = "💰 [高檔反轉] RSI 自高檔反轉向下。\n      👉 **短線客**：全數停利。\n      👉 **波段客**：分批減碼。"
-                
-                # 策略 4 (縮量回踩) - 支撐防守系
-                elif "4" in strat or "回踩" in strat:
-                    custom_panel = f"月線 `{round(ma20, 2)}` | 緩衝區 `{round(ma20 * 0.97, 2)}`"
-                    if close < ma20 * 0.97: 
-                        alert_msg = "🚨 [防守貫破] 跌破月線超過 3% 緩衝區，主力確認棄守，毫無懸念立刻停損！"
-                    elif close < ma20: 
-                        alert_msg = "⚠️ [支撐測試] 跌破月線。\n      👉 **短線客**：嚴格停損出場。\n      👉 **波段客**：進入 3% 洗盤緩衝區，觀察三天內能否站回。"
-                
-                # 通用底線
-                else:
-                    custom_panel = f"10日線 `{round(ma10, 2)}` | 月線 `{round(ma20, 2)}`"
-                    if close < ma20 * 0.97: alert_msg = "🚨 跌破月線底線 3%！"
-                    
-            if not alert_msg: alert_msg = "👌 狀態穩定"
-                
+                # 1. 動能/創高視角 (S1/S5)
+                msg_15 = ""
+                if close < ma20: msg_15 = "🚨 [破月線] 動能波段皆破壞，建議清倉。"
+                elif close < ma10: msg_15 = "⚠️ [破10日線] 短線強烈建議出場；波段減碼一半。"
+                elif close < ma5: msg_15 = "🤔 [破5日線] 短線建議獲利了結；波段視為洗盤續抱。"
+                elif "1" in strat and bb_upper and close < bb_upper and prev['Close'].item() > prev['BB_Upper'].item():
+                    msg_15 = "💡 [回落通道] 漲多休息，進入高檔震盪。"
+                else: msg_15 = "🚀 [強勢多頭] 延續上攻慣性，緊抱！"
+
+                # 2. 波段趨勢視角 (S2)
+                msg_2 = ""
+                if close < ma20: msg_2 = "🚨 [破月線] 趨勢防守底線遭貫破，建議清倉！"
+                elif macd_val < sig_val: msg_2 = "⚠️ [MACD死叉] 短線出場；波段考慮減碼。"
+                elif hist_val < prev_hist < df.iloc[-3]['MACD_Hist'].item(): msg_2 = "🤔 [紅柱連縮] 短線準備落跑；波段續抱。"
+                else: msg_2 = "🌊 [波段健康] 趨勢向上無虞。"
+
+                # 3. 逆勢反彈視角 (S3)
+                msg_3 = ""
+                if close < ma20 * 0.97: msg_3 = "🚨 [破底] 跌破月線3%，反彈徹底失敗，停損！"
+                elif rsi_val < prev_rsi and prev_rsi > 70: msg_3 = "💰 [高檔反轉] 短線全數停利；波段分批減碼。"
+                else: msg_3 = f"🎣 [RSI {round(rsi_val, 1)}] 處於反彈或震盪週期。"
+
+                # 4. 支撐防守視角 (S4)
+                msg_4 = ""
+                if close < ma20 * 0.97: msg_4 = "🚨 [防守貫破] 跌穿3%主力洗盤區，毫無懸念停損！"
+                elif close < ma20: msg_4 = "⚠️ [支撐測試] 跌破月線，進入3%洗盤緩衝區，密切觀察。"
+                else: msg_4 = "🛡️ [月線有守] 支撐強勁，安全續抱。"
+
+                # 標記使用者當前選擇的策略
+                s15_label = "🔥 動能/創高" + (" (★)" if is_s15 else "")
+                s2_label  = "🌊 波段趨勢" + (" (★)" if is_s2 else "")
+                s3_label  = "🎣 逆勢反彈" + (" (★)" if is_s3 else "")
+                s4_label  = "🛡️ 支撐防守" + (" (★)" if is_s4 else "")
+
+                # 組合優雅排版
+                panel_str = (
+                    f"   [關鍵位階]: 5日 `{ma5}` | 10日 `{ma10}` | 月線 `{ma20}`\n"
+                    f"   -------------------------\n"
+                    f"   {s15_label}: {msg_15}\n"
+                    f"   {s2_label}: {msg_2}\n"
+                    f"   {s3_label}: {msg_3}\n"
+                    f"   {s4_label}: {msg_4}"
+                )
+
             tp_sl_info = f" | 停利: `+{tp_pct}%` 停損: `-{sl_pct}%`" if (tp_pct or sl_pct) else " | 風控: `未設定`"
             
-            msg += f"📌 **{display_title}**\n   市價: `{round(close, 2)}` | 成本: `{cost}` | 報酬: `{profit}%`{tp_sl_info}\n   策略: `{strat}`\n   指標: {custom_panel}\n   👉 {alert_msg}\n-------------------------\n"
+            msg += f"📌 **{display_title}**\n   市價: `{close}` | 成本: `{cost}` | 報酬: `{profit}%`{tp_sl_info}\n   策略: `{strat}`\n{panel_str}\n=========================\n"
         except Exception as e:
             msg += f"❌ **{code} {info.get('name', '')}**: 運算錯誤 ({e})\n\n"
             
@@ -423,44 +411,17 @@ async def 指令(ctx):
         description="老闆，請隨時對我下達以下指令（格式內的 `[ ]` 請記得空一格）：",
         color=0x2ECC71
     )
-    embed_cmd.add_field(name="🔍 `!健檢`", value="極速掃描目前庫存所有持股的狀態。", inline=False)
-    embed_cmd.add_field(name="🔬 `!評估 [代號]`", value="個股 X 光機！幫你鑑定這檔股票是否符合買進策略。\n*範例: `!評估 2330`*", inline=False)
-    embed_cmd.add_field(name="📥 `!新增 [代號] [成本] [策略] [名稱] [停利%] [停損%]`", value="將股票交給小秘書監控 (名稱留空會自動抓取)。\n*範例: `!新增 2330 800 1`*", inline=False)
-    embed_cmd.add_field(name="🛡️ `!風控 [代號] [停利%] [停損%]`", value="隨時更新股票的停損停利點。\n*範例: `!風控 2330 20 10`*", inline=False)
-    embed_cmd.add_field(name="⚙️ `!策略 [代號] [策略代號]`", value="修改持股的防護策略。\n*範例: `!策略 2330 4`*", inline=False)
-    embed_cmd.add_field(name="🗑️ `!刪除 [代號]`", value="將股票從監控清單中移除。\n*範例: `!刪除 2330`*", inline=False)
-    embed_cmd.add_field(name="💸 `!賣出 [代號] [賣出價] [股數]`", value="結算交易並記錄損益(股數預設1000)。\n*範例: `!賣出 2330 850 1000`*", inline=False)
-    embed_cmd.add_field(name="🏆 `!績效`", value="查看歷史累積總損益與勝率，並調閱戰敗檢討。", inline=False)
-    
-    embed_strat = discord.Embed(
-        title="📖 【五大量化策略】AI 雙重視角操盤邏輯",
-        description="系統會根據您的策略，同時給予短線客與波段客的操作建議：",
-        color=0x3498DB
-    )
-    
-    embed_strat.add_field(
-        name="1️⃣ 布林壓縮突破 & 5️⃣ 強勢創高確認",
-        value="🟢 **進場：** 帶量突破壓力區，主力準備發車。\n🔴 **防守：**\n短線客👉 跌破 5 日線即獲利了結。\n波段客👉 破 10 日線減碼，破月線清倉。",
-        inline=False
-    )
-    embed_strat.add_field(
-        name="2️⃣ 雙均線 + MACD (抓波段趨勢)",
-        value="🟢 **進場：** 站上季線且 MACD 翻揚。\n🔴 **防守：**\n短線客👉 MACD 死叉或紅柱縮減即出場。\n波段客👉 不理會小波動，以月線做最後防線。",
-        inline=False
-    )
-    embed_strat.add_field(
-        name="3️⃣ RSI 超賣反彈 (抓危機入市)",
-        value="🟢 **進場：** RSI 跌破超賣區後反轉向上。\n🔴 **防守：** 反彈高點 RSI 衝破 70 後勾下時停利；若跌破月線 3% 則停損。",
-        inline=False
-    )
-    embed_strat.add_field(
-        name="4️⃣ 多頭縮量回踩 (高勝率買跌)",
-        value="🟢 **進場：** 好股票跌到月線附近，且成交量極度萎縮。\n🔴 **防守：** \n短線客👉 跌破月線嚴格停損。\n波段客👉 觀察 3% 洗盤緩衝區，若遭貫破即刻停損。",
-        inline=False
-    )
+    embed_cmd.add_field(name="🔍 `!健檢`", value="360度全方位掃描目前庫存的狀態。", inline=False)
+    embed_cmd.add_field(name="🔬 `!評估 [代號]`", value="個股 X 光機！幫你鑑定這檔股票是否符合買進策略。", inline=False)
+    embed_cmd.add_field(name="📥 `!新增 [代號] [成本] [策略] [名稱] [停利%] [停損%]`", value="將股票交給小秘書監控 (名稱留空會自動抓取)。", inline=False)
+    embed_cmd.add_field(name="✏️ `!成本 [代號] [新成本]`", value="修改持股的買入平均成本價。\n*範例: `!成本 2330 820`*", inline=False)
+    embed_cmd.add_field(name="🛡️ `!風控 [代號] [停利%] [停損%]`", value="隨時更新股票的停損停利點。", inline=False)
+    embed_cmd.add_field(name="⚙️ `!策略 [代號] [策略代號]`", value="修改持股的防護策略。", inline=False)
+    embed_cmd.add_field(name="🗑️ `!刪除 [代號]`", value="將股票從監控清單中移除。", inline=False)
+    embed_cmd.add_field(name="💸 `!賣出 [代號] [賣出價] [股數]`", value="結算交易並記錄損益(股數預設1000)。\n*範例: `!賣出 2330 850 2000`*", inline=False)
+    embed_cmd.add_field(name="🏆 `!績效 [YYYY-MM]`", value="查看總績效與月度績效明細。\n*範例: `!績效` (看當月) 或 `!績效 2026-04`*", inline=False)
     
     await ctx.send(embed=embed_cmd)
-    await ctx.send(embed=embed_strat)
 
 @bot.command()
 async def 評估(ctx, code: str):
@@ -475,7 +436,7 @@ async def 評估(ctx, code: str):
 
 @bot.command()
 async def 健檢(ctx):
-    msg = await ctx.send("⏳ 正在極速分析庫存短線敏銳技術指標...")
+    msg = await ctx.send("⏳ 正在啟動 360 度全方位庫存診斷系統...")
     try:
         result = await asyncio.wait_for(asyncio.to_thread(run_health_check), timeout=120.0)
         if len(result) > 1900: result = result[:1900] + "\n\n⚠️ ...(庫存過多，字數達 Discord 上限)"
@@ -488,10 +449,8 @@ async def 新增(ctx, code: str, price: float, strat_num: str, name: str = "", t
     if not name:
         tickers_dict = get_all_taiwan_tickers()
         exact_ticker = f"{code}.TW" if f"{code}.TW" in tickers_dict else f"{code}.TWO"
-        if exact_ticker in tickers_dict:
-            name = tickers_dict[exact_ticker]['name']
-        else:
-            name = "未知名稱"
+        if exact_ticker in tickers_dict: name = tickers_dict[exact_ticker]['name']
+        else: name = "未知名稱"
             
     full_strat = STRAT_MAP.get(strat_num, strat_num) 
     data = load_data()
@@ -502,6 +461,19 @@ async def 新增(ctx, code: str, price: float, strat_num: str, name: str = "", t
     风控文 = f" | 停利: +{tp}% 停損: -{sl}%" if (tp or sl) else " | 未設定風控"
     await ctx.send(f"✅ 已新增 **{display_title}**\n成本: `{price}`\n策略: `{full_strat}`{风控文}")
 
+# 🔥 全新功能：修改平均成本
+@bot.command()
+async def 成本(ctx, code: str, new_price: float):
+    data = load_data()
+    if code in data:
+        old_price = data[code].get('buy_price', 0)
+        data[code]['buy_price'] = new_price
+        save_data(data)
+        name = data[code].get('name', '')
+        await ctx.send(f"✅ **{code} {name}** 成本價已成功從 `{old_price}` 修改為 `{new_price}`！")
+    else:
+        await ctx.send(f"⚠️ 老闆，你的監控清單裡找不到代號 **{code}** 喔！")
+
 @bot.command()
 async def 風控(ctx, code: str, tp: float, sl: float):
     data = load_data()
@@ -511,15 +483,6 @@ async def 風控(ctx, code: str, tp: float, sl: float):
         save_data(data)
         name = data[code].get('name', '')
         await ctx.send(f"✅ **{code} {name}** 風控設定成功！\n🎯 停利點: `+{tp}%`\n🛑 停損點: `-{sl}%`")
-    else: await ctx.send(f"⚠️ 找不到代號 {code}。")
-
-@bot.command()
-async def 命名(ctx, code: str, name: str):
-    data = load_data()
-    if code in data:
-        data[code]['name'] = name
-        save_data(data)
-        await ctx.send(f"✅ 已將代號 **{code}** 命名為 **{name}**")
     else: await ctx.send(f"⚠️ 找不到代號 {code}。")
 
 @bot.command()
@@ -545,9 +508,6 @@ async def 策略(ctx, code: str, strat_num: str):
 
 @bot.command()
 async def 賣出(ctx, code: str, sell_price: float, shares: int = 1000):
-    """ 
-    賣出指令。預設股數為 1000 股 (1張)。
-    """
     data = load_data()
     if code not in data:
         await ctx.send(f"⚠️ 老闆，你的監控清單裡找不到代號 **{code}** 的庫存記錄喔！")
@@ -558,14 +518,11 @@ async def 賣出(ctx, code: str, sell_price: float, shares: int = 1000):
     name = info.get('name', '')
     strat = info.get('strategy', '無')
     
-    # 💡 終極防呆：如果在資料庫裡沒有名稱，或是顯示未知名稱，結算前強制補抓一次！
     if not name or name == "未知名稱":
         tickers_dict = get_all_taiwan_tickers()
         exact_ticker = f"{code}.TW" if f"{code}.TW" in tickers_dict else f"{code}.TWO"
-        if exact_ticker in tickers_dict:
-            name = tickers_dict[exact_ticker]['name']
-        else:
-            name = "未知名稱"
+        if exact_ticker in tickers_dict: name = tickers_dict[exact_ticker]['name']
+        else: name = "未知名稱"
     
     pnl_amount = (sell_price - buy_price) * shares
     pnl_pct = round(((sell_price - buy_price) / buy_price) * 100, 2) if buy_price > 0 else 0
@@ -583,7 +540,7 @@ async def 賣出(ctx, code: str, sell_price: float, shares: int = 1000):
     record = {
         "date": datetime.now(timezone(timedelta(hours=8))).strftime('%Y-%m-%d %H:%M'),
         "code": code,
-        "name": name,  # 這裡會存入修正後的正確名稱
+        "name": name,
         "buy_price": buy_price,
         "sell_price": sell_price,
         "shares": shares,
@@ -612,45 +569,76 @@ async def 賣出(ctx, code: str, sell_price: float, shares: int = 1000):
     
     total_pnl = history['total_pnl']
     total_str = f"+{int(total_pnl)}" if total_pnl >= 0 else f"{int(total_pnl)}"
-    embed.add_field(name="🏦 累積總損益", value=f"**{total_str} 元**", inline=False)
+    embed.add_field(name="🏦 歷史累積總損益", value=f"**{total_str} 元**", inline=False)
     
-    if loss_reason:
-        embed.add_field(name="🩸 AI 戰敗檢討報告", value=loss_reason, inline=False)
-        
+    if loss_reason: embed.add_field(name="🩸 AI 戰敗檢討報告", value=loss_reason, inline=False)
     await msg.edit(content=None, embed=embed)
+
+# 🔥 全新升級：月度績效追蹤系統
 @bot.command()
-async def 績效(ctx):
-    """ 查詢累積總績效與近期虧損檢討 """
+async def 績效(ctx, target_month: str = None):
     history = load_history()
-    total = history.get('total_pnl', 0)
     trades = history.get('trades', [])
     
     if not trades:
         await ctx.send("📊 目前還沒有任何已結算的交易紀錄喔！")
         return
         
-    win_count = sum(1 for t in trades if t['pnl'] >= 0)
-    loss_count = len(trades) - win_count
-    win_rate = round(win_count / len(trades) * 100, 1)
+    total_all_time = history.get('total_pnl', 0)
     
-    embed = discord.Embed(
-        title="🏆 雲端小秘書 - 總體績效戰報",
-        color=0xF1C40F
-    )
-    total_str = f"+{int(total)}" if total >= 0 else f"{int(total)}"
-    embed.add_field(name="💵 累積總損益", value=f"**{total_str} 元**", inline=False)
-    embed.add_field(name="📊 交易數據", value=f"總筆數: `{len(trades)}` 筆\n獲利: `{win_count}` 筆 | 虧損: `{loss_count}` 筆\n勝率: `{win_rate}%`", inline=False)
-    
-    if loss_count > 0:
-        loss_trades = [t for t in trades if t['pnl'] < 0][-3:]
-        loss_text = ""
-        for t in loss_trades:
-            short_reason = t['loss_reason'].split('\n')[0] if t['loss_reason'] else "無"
-            loss_text += f"**{t['date']} | {t['code']} {t['name']}** (`{int(t['pnl'])}`元)\n👉 {short_reason}\n\n"
+    # 依據 YYYY-MM 將交易分類
+    monthly_data = {}
+    for t in trades:
+        month_key = t['date'][:7] 
+        if month_key not in monthly_data:
+            monthly_data[month_key] = {'pnl': 0, 'wins': 0, 'losses': 0, 'details': []}
+        monthly_data[month_key]['pnl'] += t['pnl']
+        if t['pnl'] >= 0: monthly_data[month_key]['wins'] += 1
+        else: monthly_data[month_key]['losses'] += 1
+        monthly_data[month_key]['details'].append(t)
         
-        if loss_text:
-            embed.add_field(name="🔍 近期戰敗紀錄摘要 (Top 3)", value=loss_text.strip(), inline=False)
+    if not target_month:
+        target_month = datetime.now(timezone(timedelta(hours=8))).strftime('%Y-%m')
+        
+    if target_month not in monthly_data and monthly_data:
+        # 如果當月還沒交易，預設顯示最近有交易的那個月
+        target_month = sorted(monthly_data.keys())[-1]
+
+    embed = discord.Embed(title="🏆 雲端小秘書 - 月度績效戰報", color=0xF1C40F)
+    total_str = f"+{int(total_all_time)}" if total_all_time >= 0 else f"{int(total_all_time)}"
+    embed.add_field(name="🌍 歷史累積總損益 (All-Time)", value=f"**{total_str} 元**", inline=False)
+    
+    # 列出最近 3 個月的統整
+    recent_months = sorted(monthly_data.keys(), reverse=True)[:3]
+    month_summary_str = ""
+    for m in recent_months:
+        m_pnl = monthly_data[m]['pnl']
+        m_str = f"+{int(m_pnl)}" if m_pnl >= 0 else f"{int(m_pnl)}"
+        total_trades = monthly_data[m]['wins'] + monthly_data[m]['losses']
+        m_win_rate = round(monthly_data[m]['wins'] / total_trades * 100, 1) if total_trades > 0 else 0
+        month_summary_str += f"**{m}**: `{m_str}元` (勝率 {m_win_rate}%)\n"
+        
+    embed.add_field(name="📅 近期月份總結", value=month_summary_str, inline=False)
+    
+    # 顯示特定月份的每一筆明細
+    if target_month in monthly_data:
+        t_data = monthly_data[target_month]
+        t_pnl = t_data['pnl']
+        t_str = f"+{int(t_pnl)}" if t_pnl >= 0 else f"{int(t_pnl)}"
+        t_total = t_data['wins'] + t_data['losses']
+        t_win_rate = round(t_data['wins'] / t_total * 100, 1) if t_total > 0 else 0
+        
+        detail_str = ""
+        for t in t_data['details']:
+            p_str = f"+{int(t['pnl'])}" if t['pnl'] >= 0 else f"{int(t['pnl'])}"
+            detail_str += f"• **{t['code']} {t['name']}**: `{p_str}元` ({t['pnl_pct']}%)\n"
             
+        if len(detail_str) > 900: detail_str = detail_str[:900] + "...\n(為節省版面，隱藏部分明細)"
+        embed.add_field(name=f"🔍 {target_month} 當月明細 (總計: {t_str}元 | 勝率: {t_win_rate}%)", value=detail_str, inline=False)
+    else:
+        embed.add_field(name=f"🔍 {target_month} 當月明細", value="該月份尚無結算的交易紀錄。", inline=False)
+        
+    embed.set_footer(text="💡 提示：輸入 `!績效 2026-04` 可調閱特定月份明細。")
     await ctx.send(embed=embed)
 
 async def start_web_server():
