@@ -2,6 +2,7 @@ import discord
 from discord.ext import commands, tasks
 import yfinance as yf
 import pandas as pd
+import numpy as np # 💡 法人量化模型必需模組
 import json
 import os
 import asyncio
@@ -9,7 +10,7 @@ from aiohttp import web
 from datetime import datetime, time, timezone, timedelta
 import requests
 import logging
-import copy # 💡 破解 Discord 多行指令需要的模組
+import copy
 
 # 強制關閉 yfinance 煩人的紅字報錯
 logging.getLogger('yfinance').setLevel(logging.CRITICAL)
@@ -98,7 +99,7 @@ def get_all_taiwan_tickers():
     return _TICKER_CACHE
 
 # =====================================================================
-# 🛡️ 核心：指標計算、環境濾網與戰敗分析
+# 🛡️ 核心：指標計算、環境濾網與戰敗分析 (升級版)
 # =====================================================================
 def calculate_indicators(df):
     if isinstance(df.columns, pd.MultiIndex):
@@ -114,17 +115,20 @@ def calculate_indicators(df):
     
     df['Max_20'] = df['Close'].rolling(window=20).max()
     
+    # 布林通道
     std = df['Close'].rolling(window=20).std()
     df['BB_Upper'] = df['SMA_20'] + (2 * std)
     df['BB_Lower'] = df['SMA_20'] - (2 * std)
     df['BB_Width'] = (df['BB_Upper'] - df['BB_Lower']) / df['SMA_20']
     
+    # MACD
     ema12 = df['Close'].ewm(span=12, adjust=False).mean()
     ema26 = df['Close'].ewm(span=26, adjust=False).mean()
     df['MACD'] = ema12 - ema26
     df['Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
     df['MACD_Hist'] = df['MACD'] - df['Signal']
     
+    # RSI
     delta = df['Close'].diff()
     gain = delta.where(delta > 0, 0)
     loss = -delta.where(delta < 0, 0)
@@ -132,6 +136,18 @@ def calculate_indicators(df):
     avg_loss = loss.ewm(alpha=1/14, adjust=False).mean()
     rs = avg_gain / avg_loss
     df['RSI'] = 100 - (100 / (1 + rs))
+    
+    # ATR 真實波動幅度 (用於法人動態停損)
+    high_low = df['High'] - df['Low']
+    high_close = np.abs(df['High'] - df['Close'].shift())
+    low_close = np.abs(df['Low'] - df['Close'].shift())
+    ranges = pd.concat([high_low, high_close, low_close], axis=1)
+    true_range = np.max(ranges, axis=1)
+    df['ATR_14'] = true_range.rolling(14).mean()
+    
+    # 多頭排列與均線糾結判定
+    df['Bull_Aligned'] = (df['SMA_5'] > df['SMA_10']) & (df['SMA_10'] > df['SMA_20']) & (df['SMA_20'] > df['SMA_60'])
+    
     return df
 
 def check_market_trend():
@@ -186,6 +202,9 @@ def run_loss_analysis(code, name, buy_price, sell_price, strat):
     except Exception as e:
         return f"分析失敗 ({e})"
 
+# =====================================================================
+# 📚 升級版：法人級深度健檢
+# =====================================================================
 def run_deep_analysis(code):
     tickers_dict = get_all_taiwan_tickers() 
     exact_ticker = f"{code}.TW"
@@ -216,14 +235,21 @@ def run_deep_analysis(code):
         ma10 = round(latest['SMA_10'].item(), 2)
         ma20 = round(latest['SMA_20'].item(), 2)
         ma60 = round(latest['SMA_60'].item(), 2)
-        max20 = round(latest['Max_20'].item(), 2)
         bb_upper = round(latest['BB_Upper'].item(), 2)
         rsi = round(latest['RSI'].item(), 2)
         macd = round(latest['MACD'].item(), 2)
         sig = round(latest['Signal'].item(), 2)
+        atr = latest['ATR_14'].item()
         
-        foreign_net_lots = 0
-        trust_net_lots = 0
+        # 估值狀態判定
+        val_status = ""
+        if pe_ratio != 'N/A':
+            if pe_ratio > 40: val_status = "屬於高估值動能股，對資金行情敏感，嚴禁向下攤平。"
+            elif pe_ratio < 15: val_status = "屬於低本益比價值股，下檔具備基本面保護傘。"
+            else: val_status = "估值處於合理區間。"
+        
+        # 籌碼資料抓取
+        foreign_net_lots, trust_net_lots = 0, 0
         chip_status = ""
         try:
             start_date = (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d')
@@ -231,89 +257,78 @@ def run_deep_analysis(code):
             params = {"dataset": "TaiwanStockInstitutionalInvestorsBuySell", "data_id": code, "start_date": start_date, "token": FINMIND_TOKEN}
             res = requests.get(url, params=params, timeout=8).json()
             
-            if res.get('status') == 200:
+            if res.get('status') == 200 and res.get('data'):
                 data_list = res.get('data', [])
+                dates = sorted(list(set(d['date'] for d in data_list)), reverse=True)[:5] 
+                foreign_net, trust_net = 0, 0
+                for d in data_list:
+                    if d['date'] in dates:
+                        name = d.get('name', '')
+                        net = d.get('buy', 0) - d.get('sell', 0)
+                        if '外資' in name or 'Foreign' in name: foreign_net += net
+                        elif '投信' in name or 'Investment' in name: trust_net += net
                 
-                if not data_list:
-                    chip_status = "⚠️ FinMind 伺服器暫無此檔股票近期的籌碼資料。\n    結論：目前缺乏近期法人數據，請單純參考技術面操作。"
-                else:
-                    dates = sorted(list(set(d['date'] for d in data_list)), reverse=True)[:5] 
-                    foreign_net = 0
-                    trust_net = 0
-                    for d in data_list:
-                        if d['date'] in dates:
-                            name = d.get('name', '')
-                            net = d.get('buy', 0) - d.get('sell', 0)
-                            if '外資' in name or 'Foreign' in name: foreign_net += net
-                            elif '投信' in name or 'Investment' in name: trust_net += net
-                            
-                    foreign_net_lots = int(foreign_net / 1000)
-                    trust_net_lots = int(trust_net / 1000)
-                    
-                    if foreign_net_lots == 0 and trust_net_lots == 0:
-                        chip_status = "⚠️ 近 5 日無明顯外資與投信進出紀錄。"
-                    else:
-                        f_str = f"買超 {foreign_net_lots}" if foreign_net_lots >= 0 else f"賣超 {abs(foreign_net_lots)}"
-                        t_str = f"買超 {trust_net_lots}" if trust_net_lots >= 0 else f"賣超 {abs(trust_net_lots)}"
-                        chip_status = f"近 5 日外資合計: `{f_str}` 張\n近 5 日投信合計: `{t_str}` 張\n"
-                        
-                        if foreign_net_lots > 0 and trust_net_lots > 0: chip_status += "    結論：法人同步看好，籌碼集中度極佳。"
-                        elif trust_net_lots > 0: chip_status += "    結論：投信積極進駐，內資籌碼集中。"
-                        elif foreign_net_lots < 0 and trust_net_lots < 0: chip_status += "    結論：土洋法人同步倒貨，籌碼結構轉弱。"
-                        elif foreign_net_lots == 0 or trust_net_lots == 0: chip_status += "    結論：單一法人靜待觀望，籌碼動能一般。"
-                        else: chip_status += "    結論：土洋對作，籌碼目前處於換手或震盪狀態。"
-            else:
-                chip_status = f"⚠️ 無法取得近期籌碼資料。"
-        except Exception as e:
-            chip_status = "⚠️ 籌碼資料伺服器連線異常或超時。"
+                foreign_net_lots = int(foreign_net / 1000)
+                trust_net_lots = int(trust_net / 1000)
+                
+                f_str = f"買超 {foreign_net_lots}" if foreign_net_lots >= 0 else f"賣超 {abs(foreign_net_lots)}"
+                t_str = f"買超 {trust_net_lots}" if trust_net_lots >= 0 else f"賣超 {abs(trust_net_lots)}"
+                chip_status = f"近 5 日外資合計: `{f_str}` 張\n近 5 日投信合計: `{t_str}` 張\n"
+                
+                # 強化籌碼過濾：排除百張以下的無意義雜訊
+                if abs(foreign_net_lots) < 200 and abs(trust_net_lots) < 200:
+                    chip_status += "    結論：法人進出量極小，視為散單或被動型基金微調，無明顯方向。"
+                elif foreign_net_lots > 0 and trust_net_lots > 0: chip_status += "    結論：法人同步看好，籌碼集中度極佳。"
+                elif trust_net_lots > 200: chip_status += "    結論：投信具備規模進駐，內資主導籌碼。"
+                elif foreign_net_lots < -500 and trust_net_lots < -200: chip_status += "    結論：土洋法人同步倒貨，籌碼結構明顯轉弱。"
+                else: chip_status += "    結論：外資投信分歧，籌碼目前處於換手震盪狀態。"
+            else: chip_status = "⚠️ 無法取得近期籌碼資料或伺服器無資料。"
+        except: chip_status = "⚠️ 籌碼資料伺服器連線異常或超時。"
 
-        if close > ma20 and close > ma60: trend_msg = f"目前股價 (`{close}`) 站穩月線 (`{ma20}`) 與季線 (`{ma60}`) 之上，屬於標準多頭排列。"
-        elif close < ma20 and close < ma60: trend_msg = f"目前股價 (`{close}`) 跌破月線 (`{ma20}`) 與季線 (`{ma60}`)，處於空頭弱勢格局。"
-        else: trend_msg = f"目前股價處於月線與季線之間，屬於震盪整理階段。"
+        # 趨勢判定
+        bull_aligned = latest['Bull_Aligned'].item()
+        if bull_aligned and close > ma60: trend_msg = f"均線呈現標準「多頭排列」，長中短天期趨勢一致向上。"
+        elif close > ma20 and close > ma60: trend_msg = f"目前股價 (`{close}`) 站穩月季線，屬偏多震盪格局。"
+        elif close < ma20 and close < ma60: trend_msg = f"股價跌破生命線，處於空頭弱勢格局，易跌難漲。"
+        else: trend_msg = f"目前股價處於月線與季線之間，屬於震盪整理、方向未明階段。"
         
-        if close >= max20 * 0.97 and close >= ma20: trend_msg += f" 逼近波段高點 (`{max20}`元)，隨時準備挑戰前高，短線資金動能強勁。"
-        
-        if rsi > 70: rsi_msg = "位於 70 以上極強區間，動能強悍但也須留意短線過熱風險。"
-        elif rsi > 50: rsi_msg = "位於 50~70 偏多區間，動能健康溫和。"
-        elif rsi > 30: rsi_msg = "位於 30~50 偏弱區間，多方動能受壓。"
-        else: rsi_msg = "位於 30 以下超賣區，醞釀跌深反彈契機。"
-        
-        if macd > sig: macd_msg = f"快線 (`{macd}`) 大於 慢線 (`{sig}`)\n    維持多頭黃金交叉狀態，動能充沛。"
-        else: macd_msg = f"快線 (`{macd}`) 小於 慢線 (`{sig}`)\n    維持空頭死叉狀態，動能受壓。"
-
-        def1_low, def1_high = round(ma10 * 0.98, 1), round(ma10 * 1.01, 1)
-        def2_low, def2_high = round(ma20 * 0.97, 1), round(ma20 * 1.02, 1)
+        # 防禦點位改用 ATR 真實波動計算
+        def1_low, def1_high = round(ma10 - (atr * 0.5), 1), round(ma10 + (atr * 0.5), 1)
+        def2_low, def2_high = round(ma20 - (atr * 0.5), 1), round(ma20 + (atr * 0.5), 1)
 
         now_str = datetime.now(timezone(timedelta(hours=8))).strftime('%Y-%m-%d %H:%M')
         
-        msg = f"🔍 **【AI 個股深度健檢與實戰戰報】**\n"
-        msg += f"📌 **{code} {stock_name}** | 檢測時間：`{now_str}` | 目前現價：`{close}`\n"
+        msg = f"🔍 **【法人級 個股深度健檢】**\n"
+        msg += f"📌 **{code} {stock_name}** | 檢測時間：`{now_str}` | 收盤價：`{close}`\n"
         msg += "----------------------------------------\n"
-        msg += "**一、基本面與趨勢判定 (Fundamentals & Trend)**\n"
-        msg += f"• **基本短評**：所屬產業為【{sector}】，目前本益比約 `{pe_ratio}` 倍。\n"
-        msg += f"• **趨勢狀態**：{trend_msg}\n\n"
-        msg += "**二、技術動能狀態 (Momentum)**\n"
-        msg += f"• **RSI 指標 (14日)**: `{rsi}`\n    {rsi_msg}\n"
-        msg += f"• **MACD 狀態**: {macd_msg}\n\n"
-        msg += "**三、關鍵防禦與低接點位 (Support & Entry)**\n"
+        msg += "**一、產業定錨與估值 (Fundamentals & Valuation)**\n"
+        msg += f"• **產業定位**：【{sector}】\n"
+        msg += f"• **估值評級**：目前本益比 `{pe_ratio}` 倍。{val_status}\n\n"
+        msg += "**二、技術動能狀態 (Momentum & Trend)**\n"
+        msg += f"• **趨勢狀態**：{trend_msg}\n"
+        msg += f"• **RSI (14日)**: `{rsi}` (動能狀態)\n"
+        msg += f"• **MACD 狀態**: `{macd}` vs `{sig}` (快慢線)\n\n"
+        msg += "**三、ATR 波動防禦點位 (Risk & Entry)**\n"
+        msg += f"• **日均波動(ATR)**: `{round(atr, 2)}` 元 (設定停損的參考級距)\n"
         msg += f"• **近期短壓 (布林上軌)**: 約 `{bb_upper}` 元附近\n"
-        msg += f"• **第一防線 (短線支撐)**: `{def1_low} ~ {def1_high}` 元 (10日線防禦區)\n"
-        msg += "    操作：積極型投資人可在出現量縮止跌時，在此區間進行試單。\n"
-        msg += f"• **第二防線 (波段大本營)**: `{def2_low} ~ {def2_high}` 元 (月線防禦區)\n"
-        msg += "    操作：此波多頭趨勢的生命線，穩健型投資人最理想的重倉加碼區。\n\n"
+        msg += f"• **第一防線 (10日動能支撐)**: `{def1_low} ~ {def1_high}` 元\n"
+        msg += f"• **第二防線 (月線波段大本營)**: `{def2_low} ~ {def2_high}` 元\n"
+        msg += "    *操作紀律：買黑不買紅，切勿在乖離過大時追高，建議於防線量縮時試單。*\n\n"
         msg += "**四、法人籌碼結構 (Chip Analysis)**\n"
         msg += f"{chip_status}\n\n"
-        msg += "**五、綜合診斷與教練對策 (Conclusion)**\n"
-        msg += "• **資金策略**：台股近期波動劇烈，切忌單筆買滿。建議將資金拆成 2~3 等分，於防線分批進場。\n"
+        msg += "**五、總結與教練對策 (Manager's Plan)**\n"
         if close > ma20:
-            msg += "• **操作建議**：此為自選觀察股，請嚴守上述低接點位，勿於爆量大漲時盲目追高。"
+            msg += f"• **行動綱領**：趨勢偏多。若決定進場，請將總防守停損線設於 **`{round(ma20 - atr, 1)}`** (月線扣除一倍ATR)，若實體黑K跌破且三日內不站回，無條件停損出場。"
         else:
-            msg += "• **操作建議**：目前趨勢偏空，建議多看少做，或等待股價強勢站回月線後再行評估。"
+            msg += "• **行動綱領**：目前趨勢偏空。右側交易者應耐心等待股價「帶量站回月線」且「MACD黃金交叉」後，再行評估進場。"
             
         return msg
     except Exception as e:
         return f"❌ 分析過程發生錯誤: `{e}`"
 
+# =====================================================================
+# 🔬 升級版：量化評估與資金管控
+# =====================================================================
 def run_evaluation(code):
     tickers_dict = get_all_taiwan_tickers() 
     exact_ticker = f"{code}.TW"
@@ -329,8 +344,7 @@ def run_evaluation(code):
     try:
         market_uptrend = check_market_trend()
         df = yf.download(exact_ticker, period="4mo", progress=False)
-        if df.empty or len(df) < 65:
-            return f"⚠️ 找不到代號 {code} 的報價，或上市時間太短不足以計算季線與技術指標。"
+        if df.empty or len(df) < 65: return f"⚠️ 找不到報價，或上市時間太短。"
             
         df = calculate_indicators(df)
         latest = df.iloc[-1]
@@ -339,86 +353,82 @@ def run_evaluation(code):
         close = round(latest['Close'].item(), 2)
         low = round(latest['Low'].item(), 2)
         vol = latest['Volume'].item()
-        open_px = latest['Open'].item()
-        ma20 = round(latest['SMA_20'].item(), 2)
-        ma60 = round(latest['SMA_60'].item(), 2)
         vol_5ma = latest['Vol_5MA'].item()
+        vol_20ma = latest['Vol_20MA'].item()
+        
+        ma20 = round(latest['SMA_20'].item(), 2)
+        atr = latest['ATR_14'].item()
+        bull_aligned = latest['Bull_Aligned'].item()
+        
         bb_width = prev1['BB_Width'].item()
         macd, sig = latest['MACD'].item(), latest['Signal'].item()
-        prev_macd = prev1['MACD'].item()
-        rsi = latest['RSI'].item()
-        prev_rsi = prev1['RSI'].item()
+        rsi, prev_rsi = latest['RSI'].item(), prev1['RSI'].item()
         max20_prev = prev1['Max_20'].item()
-        is_uptrend = latest['SMA_60'].item() > prev1['SMA_60'].item()
         
-        bb_pass = (bb_width < 0.10) and (close > latest['BB_Upper'].item()) and (vol > (vol_5ma * 1.5)) and is_uptrend and (close > open_px)
-        macd_pass = is_uptrend and (close > ma60) and (macd > sig) and (macd > prev_macd)
-        rsi_pass = (close < ma20) and (prev_rsi < 35) and (rsi >= 30) and (rsi > prev_rsi)
-        pullback_pass = is_uptrend and (close > ma60) and (low <= ma20 * 1.03) and (close >= ma20) and (vol < vol_5ma)
-        breakout_pass = is_uptrend and (ma20 > ma60) and (close >= max20_prev) and (vol > vol_5ma * 1.2)
+        # 量化策略條件全面升級 (加入均線糾結與相對成交量)
+        bb_pass = (bb_width < 0.12) and (close > latest['BB_Upper'].item()) and (vol > (vol_20ma * 2.0)) and bull_aligned
+        macd_pass = bull_aligned and (macd > sig) and (prev1['MACD'].item() <= prev1['Signal'].item())
+        rsi_pass = (close < ma20) and (prev_rsi < 30) and (rsi >= 30)
+        pullback_pass = bull_aligned and (low <= ma20 + (atr*0.5)) and (close >= ma20) and (vol < vol_20ma)
+        breakout_pass = bull_aligned and (close >= max20_prev) and (vol > vol_5ma * 1.5)
 
         market_warning = ""
         if not market_uptrend:
-            bb_pass = False
-            breakout_pass = False
-            market_warning = "⚠️ **[大盤警示]** 台灣加權指數目前跌破月線，系統已強制關閉「布林突破」與「強勢創高」策略，防禦假突破風險！\n"
+            bb_pass = breakout_pass = False
+            market_warning = "⚠️ **[大盤警示]** 台灣加權指數跌破月線，系統強制關閉「動能突破」策略，嚴防假突破！\n"
 
-        msg = f"🔬 **【個股 X 光機評估報告】**\n"
-        msg += f"📌 **{code} {stock_name}** | 最新收盤價: `{close}`\n"
-        msg += f"📊 基準: 月線 `{ma20}` | 季線 `{ma60}`\n"
+        msg = f"🔬 **【AI 量化打擊區 X 光機】**\n"
+        msg += f"📌 **{code} {stock_name}** | 收盤價: `{close}` | 日均波動 ATR: `{round(atr, 2)}`\n"
         msg += "=========================\n"
         if market_warning: msg += market_warning + "=========================\n"
         
-        if bb_pass: msg += f"💥 **策略 1 (布林動能)**: ✅ 帶量突破上軌\n"
-        else: msg += f"💥 **策略 1 (布林動能)**: ❌ 未達標\n"
-        if macd_pass: msg += f"🏄‍♂️ **策略 2 (MACD趨勢)**: ✅ MACD多頭發散中\n"
-        else: msg += f"🏄‍♂️ **策略 2 (MACD趨勢)**: ❌ 未達標\n"
-        if rsi_pass: msg += f"🎣 **策略 3 (RSI逆勢)**: ✅ 跌破超賣區後翻揚\n"
-        else: msg += f"🎣 **策略 3 (RSI逆勢)**: ❌ 未達標\n"
-        if pullback_pass: msg += f"🛡️ **策略 4 (縮量回踩)**: ✅ **[高勝率]** 縮量回測月線有守\n"
-        else: msg += f"🛡️ **策略 4 (縮量回踩)**: ❌ 未達標\n"
-        if breakout_pass: msg += f"🚀 **策略 5 (強勢創高)**: ✅ **[高勝率]** 帶量突破近一月新高\n"
-        else: msg += f"🚀 **策略 5 (強勢創高)**: ❌ 未達標\n"
-            
+        msg += f"💥 **策略 1 (布林壓縮突破)**: {'✅ 觸發' if bb_pass else '❌ 未達標'}\n"
+        msg += f"🏄‍♂️ **策略 2 (MACD多方發動)**: {'✅ 觸發' if macd_pass else '❌ 未達標'}\n"
+        msg += f"🎣 **策略 3 (極端超賣反彈)**: {'✅ 觸發' if rsi_pass else '❌ 未達標'}\n"
+        msg += f"🛡️ **策略 4 (多頭縮量回踩)**: {'✅ 觸發 [高勝率]' if pullback_pass else '❌ 未達標'}\n"
+        msg += f"🚀 **策略 5 (帶量創波段高)**: {'✅ 觸發 [高勝率]' if breakout_pass else '❌ 未達標'}\n"
         msg += "=========================\n"
         
-        if bb_pass or macd_pass or rsi_pass or pullback_pass or breakout_pass:
-            matched_strats = []
-            if bb_pass: matched_strats.append("策略1")
-            if macd_pass: matched_strats.append("策略2")
-            if rsi_pass: matched_strats.append("策略3")
-            if pullback_pass: matched_strats.append("策略4")
-            if breakout_pass: matched_strats.append("策略5")
-            
+        matched_strats = []
+        if bb_pass: matched_strats.append("策略1")
+        if macd_pass: matched_strats.append("策略2")
+        if rsi_pass: matched_strats.append("策略3")
+        if pullback_pass: matched_strats.append("策略4")
+        if breakout_pass: matched_strats.append("策略5")
+        
+        if matched_strats:
             config = load_config()
-            base_capital = config.get('total_capital', 0)
-            history = load_history()
-            history_pnl = history.get('total_pnl', 0)
-            proxy_equity = base_capital + history_pnl
+            proxy_equity = config.get('total_capital', 0) + load_history().get('total_pnl', 0)
             
-            risk_pct = round(((close - ma20) / close) * 100, 2)
-            if risk_pct > 0:
-                suggested_alloc = round((2.0 / risk_pct) * 100, 1) 
-                if suggested_alloc > 100: suggested_alloc = 100
+            # 法人級資金控管：Risk Parity (風險平價) 模型
+            stop_loss_price = round(close - (1.5 * atr), 2)
+            risk_per_share = close - stop_loss_price
+            
+            if proxy_equity > 0 and risk_per_share > 0:
+                max_loss_amt = int(proxy_equity * 0.02)
+                suggested_shares = int(max_loss_amt / risk_per_share)
+                suggested_amt = int(suggested_shares * close)
                 
-                if proxy_equity > 0:
-                    max_loss_amt = int(proxy_equity * 0.02)
-                    suggested_amt = int(proxy_equity * (suggested_alloc / 100))
-                    suggested_shares = int(suggested_amt / close)
-                    risk_advice = f"⚖️ **資金控管建議**：目前距離月線停損約 `-{risk_pct}%`。\n   👉 單筆風險上限 (2%)：約 `{max_loss_amt:,}` 元\n   👉 建議投入上限 ({suggested_alloc}%)：約 `{suggested_amt:,}` 元 (可買約 `{suggested_shares:,}` 股)\n"
-                else:
-                    risk_advice = f"⚖️ **資金控管建議**：目前距離月線停損約 `-{risk_pct}%`。若嚴守單筆虧損不超過總資金2%之紀律，建議最多投入總資金的 **`{suggested_alloc}%`**。\n"
+                risk_advice = (
+                    f"⚖️ **機構級資金控管 (風險平價模型)**\n"
+                    f"   👉 建議防守線 (1.5xATR)：破 **`{stop_loss_price}`** 元停損\n"
+                    f"   👉 帳戶 2% 風險上限：約 `{max_loss_amt:,}` 元\n"
+                    f"   👉 換算**建議買進股數**：最多 **`{suggested_shares:,}` 股** (總投入約 `{suggested_amt:,}` 元)\n"
+                )
             else:
-                risk_advice = f"⚖️ **資金控管建議**：目前股價已在月線之下，若進場屬於左側摸底，請極度縮小部位。\n"
+                risk_advice = f"⚖️ **防守建議**：將防守線設於 `{round(close - (1.5 * atr), 2)}`，嚴守單筆不虧損總資金 2% 之紀律。\n"
             
-            msg += f"💡 **【AI 教練結論】: 建議買進！**\n🔥 該股目前符合 **{', '.join(matched_strats)}** 的發動訊號。\n{risk_advice}若決定進場，請用 `!新增 {code} {close} [股數] {matched_strats[0][-1]}` 加入小秘書監控！"
+            msg += f"💡 **【AI 教練評估】: 發現交易機會！**\n🔥 該股目前符合 **{', '.join(matched_strats)}** 發動訊號。\n{risk_advice}\n進場請用 `!新增 {code} {close} [股數] {matched_strats[0][-1]}` 交給小秘書監控！"
         else:
-            msg += f"💡 **【AI 教練結論】: 建議觀望 👀**\n這檔股票目前技術面**並未觸發**任何高勝率或動能攻擊條件。請多看少做！"
+            msg += f"💡 **【AI 教練評估】: 建議觀望 👀**\n目前未觸發任何高勝率攻擊或防守條件，資金切勿在此無效率區間消耗。"
             
         return msg
     except Exception as e:
         return f"❌ 評估過程發生錯誤: `{e}`"
 
+# =====================================================================
+# 🏥 庫存健康檢查模組
+# =====================================================================
 def run_health_check():
     portfolio = load_data()
     if not portfolio: return "⚠️ 資料庫為空，請用 `!新增` 指令建立股票。不知道怎麼用請輸入 `!指令`"
@@ -570,7 +580,7 @@ def run_health_check():
         except Exception as e:
             stock_messages.append(f"❌ **{code} {info.get('name', '')}**: 運算錯誤 ({e})\n\n")
 
-    header_msg = "📊 **【雲端精準監控戰報】(V9 懶人管理升級版)**\n"
+    header_msg = "📊 **【雲端精準監控戰報】(V10 法人升級版)**\n"
     if not market_uptrend:
         header_msg += "⚠️ **[大盤警示]** 加權指數跌破月線，系統已自動關閉攻擊判定！\n"
     header_msg += "=========================\n"
@@ -682,7 +692,6 @@ async def 本金(ctx, amount: float):
     save_config(config)
     await ctx.send(f"✅ 初始本金已成功設定為: `{int(amount):,}` 元！\n系統將自動結合您的「歷史實現損益」來精準計算您的即時可用現金與帳戶總權益。")
 
-# 🔥 全新指令：極簡版庫存總覽
 @bot.command()
 async def 庫存(ctx):
     msg = await ctx.send("⏳ 正在清點您的精簡版庫存與帳務明細...")
