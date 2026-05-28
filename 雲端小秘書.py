@@ -9,6 +9,7 @@ from aiohttp import web
 from datetime import datetime, time, timezone, timedelta
 import requests
 import logging
+import copy # 💡 破解 Discord 多行指令需要的模組
 
 # 強制關閉 yfinance 煩人的紅字報錯
 logging.getLogger('yfinance').setLevel(logging.CRITICAL)
@@ -185,7 +186,6 @@ def run_loss_analysis(code, name, buy_price, sell_price, strat):
     except Exception as e:
         return f"分析失敗 ({e})"
 
-# 🔥 修正版：AI 個股深度健檢系統 (!分析)
 def run_deep_analysis(code):
     tickers_dict = get_all_taiwan_tickers() 
     exact_ticker = f"{code}.TW"
@@ -199,14 +199,12 @@ def run_deep_analysis(code):
         stock_name = tickers_dict[exact_ticker]['name']
         
     try:
-        # 1. 抓取基本面
         ticker_obj = yf.Ticker(exact_ticker)
         info = ticker_obj.info
         sector = info.get('sector', info.get('industry', '未分類產業'))
         pe_ratio = info.get('trailingPE', 'N/A')
         if isinstance(pe_ratio, float): pe_ratio = round(pe_ratio, 2)
         
-        # 2. 抓取技術面
         df = yf.download(exact_ticker, period="4mo", progress=False)
         if df.empty or len(df) < 65:
             return f"⚠️ 找不到代號 {code} 的報價，或上市時間太短不足以計算季線與技術指標。"
@@ -224,7 +222,6 @@ def run_deep_analysis(code):
         macd = round(latest['MACD'].item(), 2)
         sig = round(latest['Signal'].item(), 2)
         
-        # 3. 抓取法人籌碼 (FinMind API - 修正拉長為近 30 天，確保能撈到 5 個交易日)
         foreign_net_lots = 0
         trust_net_lots = 0
         chip_status = ""
@@ -237,10 +234,10 @@ def run_deep_analysis(code):
             if res.get('status') == 200:
                 data_list = res.get('data', [])
                 
-                if not data_list: # 💡 防呆：如果完全沒抓到資料
-                    chip_status = "⚠️ FinMind 伺服器暫無此檔股票近期的籌碼資料 (可能為免費用戶額度延遲)。\n    結論：目前缺乏近期法人數據，請單純參考技術面操作。"
+                if not data_list:
+                    chip_status = "⚠️ FinMind 伺服器暫無此檔股票近期的籌碼資料。\n    結論：目前缺乏近期法人數據，請單純參考技術面操作。"
                 else:
-                    dates = sorted(list(set(d['date'] for d in data_list)), reverse=True)[:5] # 取最近5有資料的天數
+                    dates = sorted(list(set(d['date'] for d in data_list)), reverse=True)[:5] 
                     foreign_net = 0
                     trust_net = 0
                     for d in data_list:
@@ -254,7 +251,7 @@ def run_deep_analysis(code):
                     trust_net_lots = int(trust_net / 1000)
                     
                     if foreign_net_lots == 0 and trust_net_lots == 0:
-                        chip_status = "⚠️ 近 5 日無明顯外資與投信進出紀錄 (或 API 資料尚未更新)。"
+                        chip_status = "⚠️ 近 5 日無明顯外資與投信進出紀錄。"
                     else:
                         f_str = f"買超 {foreign_net_lots}" if foreign_net_lots >= 0 else f"賣超 {abs(foreign_net_lots)}"
                         t_str = f"買超 {trust_net_lots}" if trust_net_lots >= 0 else f"賣超 {abs(trust_net_lots)}"
@@ -266,11 +263,10 @@ def run_deep_analysis(code):
                         elif foreign_net_lots == 0 or trust_net_lots == 0: chip_status += "    結論：單一法人靜待觀望，籌碼動能一般。"
                         else: chip_status += "    結論：土洋對作，籌碼目前處於換手或震盪狀態。"
             else:
-                chip_status = f"⚠️ 無法取得近期籌碼資料 (API 回傳狀態碼: {res.get('status')})。"
+                chip_status = f"⚠️ 無法取得近期籌碼資料。"
         except Exception as e:
             chip_status = "⚠️ 籌碼資料伺服器連線異常或超時。"
 
-        # 4. 判斷邏輯
         if close > ma20 and close > ma60: trend_msg = f"目前股價 (`{close}`) 站穩月線 (`{ma20}`) 與季線 (`{ma60}`) 之上，屬於標準多頭排列。"
         elif close < ma20 and close < ma60: trend_msg = f"目前股價 (`{close}`) 跌破月線 (`{ma20}`) 與季線 (`{ma60}`)，處於空頭弱勢格局。"
         else: trend_msg = f"目前股價處於月線與季線之間，屬於震盪整理階段。"
@@ -288,31 +284,25 @@ def run_deep_analysis(code):
         def1_low, def1_high = round(ma10 * 0.98, 1), round(ma10 * 1.01, 1)
         def2_low, def2_high = round(ma20 * 0.97, 1), round(ma20 * 1.02, 1)
 
-        # 5. 排版輸出
         now_str = datetime.now(timezone(timedelta(hours=8))).strftime('%Y-%m-%d %H:%M')
         
         msg = f"🔍 **【AI 個股深度健檢與實戰戰報】**\n"
         msg += f"📌 **{code} {stock_name}** | 檢測時間：`{now_str}` | 目前現價：`{close}`\n"
         msg += "----------------------------------------\n"
-        
         msg += "**一、基本面與趨勢判定 (Fundamentals & Trend)**\n"
         msg += f"• **基本短評**：所屬產業為【{sector}】，目前本益比約 `{pe_ratio}` 倍。\n"
         msg += f"• **趨勢狀態**：{trend_msg}\n\n"
-        
         msg += "**二、技術動能狀態 (Momentum)**\n"
         msg += f"• **RSI 指標 (14日)**: `{rsi}`\n    {rsi_msg}\n"
         msg += f"• **MACD 狀態**: {macd_msg}\n\n"
-        
         msg += "**三、關鍵防禦與低接點位 (Support & Entry)**\n"
         msg += f"• **近期短壓 (布林上軌)**: 約 `{bb_upper}` 元附近\n"
         msg += f"• **第一防線 (短線支撐)**: `{def1_low} ~ {def1_high}` 元 (10日線防禦區)\n"
         msg += "    操作：積極型投資人可在出現量縮止跌時，在此區間進行試單。\n"
         msg += f"• **第二防線 (波段大本營)**: `{def2_low} ~ {def2_high}` 元 (月線防禦區)\n"
         msg += "    操作：此波多頭趨勢的生命線，穩健型投資人最理想的重倉加碼區。\n\n"
-        
         msg += "**四、法人籌碼結構 (Chip Analysis)**\n"
         msg += f"{chip_status}\n\n"
-        
         msg += "**五、綜合診斷與教練對策 (Conclusion)**\n"
         msg += "• **資金策略**：台股近期波動劇烈，切忌單筆買滿。建議將資金拆成 2~3 等分，於防線分批進場。\n"
         if close > ma20:
@@ -580,7 +570,7 @@ def run_health_check():
         except Exception as e:
             stock_messages.append(f"❌ **{code} {info.get('name', '')}**: 運算錯誤 ({e})\n\n")
 
-    header_msg = "📊 **【雲端精準監控戰報】(V8.1 全能戰報升級版)**\n"
+    header_msg = "📊 **【雲端精準監控戰報】(V9 懶人管理升級版)**\n"
     if not market_uptrend:
         header_msg += "⚠️ **[大盤警示]** 加權指數跌破月線，系統已自動關閉攻擊判定！\n"
     header_msg += "=========================\n"
@@ -609,6 +599,24 @@ intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix='!', intents=intents)
 bot.remove_command('help')
+
+# 💡 魔法機制：破解 Discord 無法辨識多行指令的限制
+@bot.event
+async def on_message(message):
+    if message.author == bot.user:
+        return
+
+    if '\n' in message.content:
+        lines = message.content.split('\n')
+        for line in lines:
+            line = line.strip()
+            if line.startswith(bot.command_prefix):
+                # 複製一個假的訊息物件騙過系統，逐行執行
+                msg_copy = copy.copy(message)
+                msg_copy.content = line
+                await bot.process_commands(msg_copy)
+    else:
+        await bot.process_commands(message)
 
 @tasks.loop(minutes=30)
 async def auto_report():
@@ -652,48 +660,20 @@ async def 指令(ctx):
         description="老闆，請隨時對我下達以下指令（格式內的 `[ ]` 請記得空一格）：",
         color=0x2ECC71
     )
-    embed_cmd.add_field(name="🏦 `!本金 [金額]`", value="設定初始帳戶總資金，解鎖法人級儀表板。\n*範例: `!本金 1000000`*", inline=False)
-    embed_cmd.add_field(name="🔍 `!健檢`", value="360度全方位掃描目前庫存狀態與帳戶總權益。", inline=False)
+    embed_cmd.add_field(name="🏦 `!本金 [金額]`", value="設定初始帳戶總資金，解鎖法人級儀表板。", inline=False)
+    embed_cmd.add_field(name="📦 `!庫存`", value="【全新】秒速清點精簡版庫存與帳面賺賠明細。", inline=False)
+    embed_cmd.add_field(name="🔍 `!健檢`", value="360度全方位掃描目前庫存狀態與操盤教練對策。", inline=False)
     embed_cmd.add_field(name="🔬 `!評估 [代號]`", value="個股攻擊雷達！自動依據本金換算建議買進股數。", inline=False)
-    embed_cmd.add_field(name="📑 `!分析 [代號]`", value="【全新】法人級個股深度研究報告 (含外資投信籌碼)。", inline=False)
-    embed_cmd.add_field(name="📥 `!新增 [代號] [均價] [股數] [策略] [停利%] [停損%]`", value="將股票交給小秘書監控 (名稱全自動抓取)。\n*範例: `!新增 2330 800 2000 1`*", inline=False)
-    embed_cmd.add_field(name="✏️ `!部位 [代號] [新均價] [新總股數]`", value="手動校正持股的成本價與總股數。\n*範例: `!部位 2330 820 3000`*", inline=False)
+    embed_cmd.add_field(name="📑 `!分析 [代號]`", value="法人級個股深度研究報告 (含外資投信籌碼)。", inline=False)
+    embed_cmd.add_field(name="📥 `!新增 [代號] [均價] [股數] [策略] [停利%] [停損%]`", value="將股票交給小秘書監控 (名稱全自動抓取)。", inline=False)
+    embed_cmd.add_field(name="✏️ `!部位 [代號] [新均價] [新總股數]`", value="手動校正持股的成本價與總股數。", inline=False)
     embed_cmd.add_field(name="🛡️ `!風控 [代號] [停利%] [停損%]`", value="隨時更新股票的停損停利點。", inline=False)
     embed_cmd.add_field(name="⚙️ `!策略 [代號] [策略代號]`", value="修改持股的防護策略。", inline=False)
-    embed_cmd.add_field(name="🏷️ `!命名 [代號] [名稱]`", value="手動為股票正名 (若系統未抓到時使用)。", inline=False)
     embed_cmd.add_field(name="🗑️ `!刪除 [代號]`", value="將股票從監控清單中移除。", inline=False)
-    embed_cmd.add_field(name="💸 `!賣出 [代號] [賣出價] [賣出股數]`", value="結算並記錄損益。股數留空則全數賣出。\n*範例: `!賣出 2330 850 1000`*", inline=False)
-    embed_cmd.add_field(name="🏆 `!績效 [YYYY-MM]`", value="查看總績效與月度績效明細。\n*範例: `!績效` 或 `!績效 2026-04`*", inline=False)
-    
-    embed_strat = discord.Embed(
-        title="📖 【五大量化策略】AI 雙重視角操盤邏輯",
-        description="系統會根據您選擇的策略，同時給予短線客與波段客的操作建議：",
-        color=0x3498DB
-    )
-    
-    embed_strat.add_field(
-        name="1️⃣ 布林壓縮突破 & 5️⃣ 強勢創高確認 (動能飆股)",
-        value="🟢 **為何買：** 股票盤整很久或突破壓力區，主力準備發車！\n🔴 **為何賣：** 飆車最怕熄火。\n👉 **短線客**：跌破「5日線」極強動能消散，立刻獲利了結。\n👉 **波段客**：跌破「10日線」代表假突破，減碼一半保本；跌破「月線」清倉。",
-        inline=False
-    )
-    embed_strat.add_field(
-        name="2️⃣ 雙均線 + MACD (波段大趨勢)",
-        value="🟢 **為何買：** 長線趨勢向上(站穩季線)，且 MACD 翻揚。代表短線整理結束，新一波漲勢啟動。\n🔴 **為何賣：** 波段結束。\n👉 **短線客**：MACD 紅柱連續縮減或死叉，代表沒力了，立刻出場。\n👉 **波段客**：不理會短線震盪，以「月線」作為最後防守底線。",
-        inline=False
-    )
-    embed_strat.add_field(
-        name="3️⃣ RSI 超賣反彈 (危機入市)",
-        value="🟢 **為何買：** 股價跌太深，散戶極度恐慌。當 RSI 重新勾起，代表殺盤力道竭盡，進場搶反彈。\n🔴 **為何賣：** 搶反彈有賺就跑。\n👉 **停利**：RSI 衝上 70 後反轉向下時。\n👉 **停損**：反彈失敗又跌破月線 3% 以上，立刻停損。",
-        inline=False
-    )
-    embed_strat.add_field(
-        name="4️⃣ 多頭縮量回踩 (高勝率防守)",
-        value="🟢 **為何買：** 好股票跌到月線附近，且「成交量極度萎縮」。代表散戶被洗掉但主力沒跑。\n🔴 **為何賣：** 買在支撐就不能破支撐！\n👉 **短線客**：跌破月線即嚴格停損出場。\n👉 **波段客**：進入 3% 主力洗盤緩衝區觀察，若跌破月線 3% 毫無懸念立刻砍倉。",
-        inline=False
-    )
+    embed_cmd.add_field(name="💸 `!賣出 [代號] [賣出價] [賣出股數]`", value="結算並記錄損益。股數留空則全數賣出。", inline=False)
+    embed_cmd.add_field(name="🏆 `!績效 [YYYY-MM]`", value="查看總績效與月度績效明細。", inline=False)
     
     await ctx.send(embed=embed_cmd)
-    await ctx.send(embed=embed_strat)
 
 @bot.command()
 async def 本金(ctx, amount: float):
@@ -701,6 +681,82 @@ async def 本金(ctx, amount: float):
     config['total_capital'] = amount
     save_config(config)
     await ctx.send(f"✅ 初始本金已成功設定為: `{int(amount):,}` 元！\n系統將自動結合您的「歷史實現損益」來精準計算您的即時可用現金與帳戶總權益。")
+
+# 🔥 全新指令：極簡版庫存總覽
+@bot.command()
+async def 庫存(ctx):
+    msg = await ctx.send("⏳ 正在清點您的精簡版庫存與帳務明細...")
+    try:
+        portfolio = load_data()
+        if not portfolio:
+            await msg.edit(content="⚠️ 資料庫為空，目前沒有任何庫存紀錄。")
+            return
+
+        tickers_dict = get_all_taiwan_tickers() 
+        config = load_config()
+        base_capital = config.get('total_capital', 0)
+        history = load_history()
+        history_pnl = history.get('total_pnl', 0)
+        
+        total_cost_of_holdings = 0
+        total_market_value = 0
+        
+        embed = discord.Embed(title="📦 【雲端小秘書 - 庫存總覽】", color=0x3498DB)
+        
+        for code, info in portfolio.items():
+            exact_ticker = f"{code}.TW"
+            if f"{code}.TW" in tickers_dict: exact_ticker = f"{code}.TW"
+            elif f"{code}.TWO" in tickers_dict: exact_ticker = f"{code}.TWO"
+            
+            try:
+                # 只抓最近 5 天資料求快
+                df = yf.download(exact_ticker, period="5d", progress=False)
+                if df.empty:
+                    close = info.get('buy_price', 0)
+                else:
+                    close = round(df['Close'].iloc[-1].item(), 2)
+            except:
+                close = info.get('buy_price', 0)
+
+            cost = info.get('buy_price', 0)
+            shares = info.get('shares', 1000)
+            stock_name = info.get('name', '未知名稱')
+            if not stock_name or stock_name == "未知名稱":
+                if exact_ticker in tickers_dict: stock_name = tickers_dict[exact_ticker]['name']
+                
+            item_cost = int(round(cost * shares))
+            item_value = int(round(close * shares))
+            total_cost_of_holdings += item_cost
+            total_market_value += item_value
+            
+            profit_amount = item_value - item_cost
+            profit_pct = round(((close - cost) / cost) * 100, 2) if cost > 0 else 0
+            
+            pnl_sign = "+" if profit_amount >= 0 else ""
+            
+            field_value = f"市價: `{close}` | 均價: `{cost}` | 股數: `{shares:,}`\n帳面損益: **{pnl_sign}{profit_amount:,}** ({pnl_sign}{profit_pct}%)"
+            embed.add_field(name=f"📌 {code} {stock_name}", value=field_value, inline=False)
+
+        if base_capital > 0:
+            current_cash = base_capital + history_pnl - total_cost_of_holdings
+            total_equity = current_cash + total_market_value
+            unrealized_pnl = total_market_value - total_cost_of_holdings
+            unrealized_pct = round((unrealized_pnl / total_cost_of_holdings) * 100, 2) if total_cost_of_holdings > 0 else 0
+            
+            pnl_sign = "+" if unrealized_pnl >= 0 else ""
+            
+            desc = (
+                f"🏦 **帳戶總權益**: `{int(total_equity):,}` 元\n"
+                f"💵 **可用現金**: `{int(current_cash):,}` 元 | 📦 **股票市值**: `{int(total_market_value):,}` 元\n"
+                f"📈 **總未實現損益**: **{pnl_sign}{int(unrealized_pnl):,}** ({pnl_sign}{unrealized_pct}%)\n"
+                f"========================="
+            )
+            embed.description = desc
+            
+        await msg.edit(content=None, embed=embed)
+        
+    except Exception as e:
+        await msg.edit(content=f"❌ 查詢過程發生系統錯誤: `{str(e)}`")
 
 @bot.command()
 async def 分析(ctx, code: str):
