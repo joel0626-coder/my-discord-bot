@@ -265,13 +265,19 @@ def run_evaluation(code):
     except Exception as e:
         return f"❌ 評估過程發生錯誤: `{e}`"
 
-# 🔥 全新升級：360度全方位健檢面板
+# 🔥 終極進化：攻守一體的 360 度健檢面板
 def run_health_check():
     portfolio = load_data()
     if not portfolio: return "⚠️ 資料庫為空，請用 `!新增` 指令建立股票。不知道怎麼用請輸入 `!指令`"
     
+    # 掃描前先統一確認大盤趨勢，避免重複請求
+    market_uptrend = check_market_trend()
     tickers_dict = get_all_taiwan_tickers() 
-    msg = "📊 **【雲端精準監控戰報】(360度視角版)**\n=========================\n"
+    
+    msg = "📊 **【雲端精準監控戰報】(360度攻守一體版)**\n"
+    if not market_uptrend:
+        msg += "⚠️ **[大盤警示]** 加權指數跌破月線，系統已自動關閉「動能與突破」攻擊判定！\n"
+    msg += "=========================\n"
     
     for code, info in portfolio.items():
         exact_ticker = f"{code}.TW"
@@ -295,20 +301,40 @@ def run_health_check():
             prev = df.iloc[-2]
             
             close = round(latest['Close'].item(), 2)
+            low = round(latest['Low'].item(), 2)
+            open_px = latest['Open'].item()
+            vol = latest['Volume'].item()
             cost = info.get('buy_price', 0)
             strat = info.get('strategy', '無')
             profit = round(((close - cost) / cost) * 100, 2) if cost > 0 else 0
             
             tp_pct, sl_pct = info.get('tp_pct', None), info.get('sl_pct', None)
             ma5, ma10, ma20 = round(latest['SMA_5'].item(), 2), round(latest['SMA_10'].item(), 2), round(latest['SMA_20'].item(), 2)
+            ma60 = round(latest['SMA_60'].item(), 2)
+            vol_5ma = latest['Vol_5MA'].item()
             bb_upper = latest['BB_Upper'].item()
+            bb_width = prev['BB_Width'].item()
             macd_val, sig_val = latest['MACD'].item(), latest['Signal'].item()
             hist_val, prev_hist = latest['MACD_Hist'].item(), prev['MACD_Hist'].item()
+            prev_macd = prev['MACD'].item()
             rsi_val, prev_rsi = latest['RSI'].item(), prev['RSI'].item()
+            max20_prev = prev['Max_20'].item()
+            is_uptrend = latest['SMA_60'].item() > prev['SMA_60'].item()
+            
+            # 💡 計算攻擊訊號 (與評估邏輯同步)
+            bb_pass = (bb_width < 0.10) and (close > bb_upper) and (vol > (vol_5ma * 1.5)) and is_uptrend and (close > open_px)
+            macd_pass = is_uptrend and (close > ma60) and (macd_val > sig_val) and (macd_val > prev_macd)
+            rsi_pass = (close < ma20) and (prev_rsi < 35) and (rsi_val >= 30) and (rsi_val > prev_rsi)
+            pullback_pass = is_uptrend and (close > ma60) and (low <= ma20 * 1.03) and (close >= ma20) and (vol < vol_5ma)
+            breakout_pass = is_uptrend and (ma20 > ma60) and (close >= max20_prev) and (vol > vol_5ma * 1.2)
+            
+            if not market_uptrend:
+                bb_pass = False
+                breakout_pass = False
             
             alert_msg = ""
             
-            # 優先判定：自訂停損停利點
+            # 優先判定：自訂停損停利點 (最嚴格防線)
             if tp_pct and profit >= float(tp_pct): alert_msg = f"💰 [已達停利點] 報酬率 {profit}% (+{tp_pct}%)！"
             elif sl_pct and profit <= -float(sl_pct): alert_msg = f"🛑 [已達停損點] 報酬率 {profit}% (-{sl_pct}%)！"
             
@@ -317,7 +343,7 @@ def run_health_check():
                 panel_str = f"   👉 {alert_msg}"
             else:
                 # ==========================================
-                # 🔥 AI 360 度全策略診斷系統
+                # 🔥 AI 360 度攻守一體診斷系統
                 # ==========================================
                 is_s15 = "1" in strat or "布林" in strat or "5" in strat or "創高" in strat
                 is_s2 = "2" in strat or "MACD" in strat
@@ -329,6 +355,8 @@ def run_health_check():
                 if close < ma20: msg_15 = "🚨 [破月線] 動能波段皆破壞，建議清倉。"
                 elif close < ma10: msg_15 = "⚠️ [破10日線] 短線強烈建議出場；波段減碼一半。"
                 elif close < ma5: msg_15 = "🤔 [破5日線] 短線建議獲利了結；波段視為洗盤續抱。"
+                elif bb_pass: msg_15 = "🎯 [突破發動] 帶量突破上軌，動能攻擊中！"
+                elif breakout_pass: msg_15 = "🎯 [創高發動] 帶量突破近一月新高，強勢上攻！"
                 elif "1" in strat and bb_upper and close < bb_upper and prev['Close'].item() > prev['BB_Upper'].item():
                     msg_15 = "💡 [回落通道] 漲多休息，進入高檔震盪。"
                 else: msg_15 = "🚀 [強勢多頭] 延續上攻慣性，緊抱！"
@@ -338,18 +366,21 @@ def run_health_check():
                 if close < ma20: msg_2 = "🚨 [破月線] 趨勢防守底線遭貫破，建議清倉！"
                 elif macd_val < sig_val: msg_2 = "⚠️ [MACD死叉] 短線出場；波段考慮減碼。"
                 elif hist_val < prev_hist < df.iloc[-3]['MACD_Hist'].item(): msg_2 = "🤔 [紅柱連縮] 短線準備落跑；波段續抱。"
+                elif macd_pass: msg_2 = "🎯 [趨勢發動] MACD多頭發散，新波段攻擊中！"
                 else: msg_2 = "🌊 [波段健康] 趨勢向上無虞。"
 
                 # 3. 逆勢反彈視角 (S3)
                 msg_3 = ""
                 if close < ma20 * 0.97: msg_3 = "🚨 [破底] 跌破月線3%，反彈徹底失敗，停損！"
                 elif rsi_val < prev_rsi and prev_rsi > 70: msg_3 = "💰 [高檔反轉] 短線全數停利；波段分批減碼。"
+                elif rsi_pass: msg_3 = "🎯 [抄底發動] 跌破超賣區後翻揚，反彈確立！"
                 else: msg_3 = f"🎣 [RSI {round(rsi_val, 1)}] 處於反彈或震盪週期。"
 
                 # 4. 支撐防守視角 (S4)
                 msg_4 = ""
                 if close < ma20 * 0.97: msg_4 = "🚨 [防守貫破] 跌穿3%主力洗盤區，毫無懸念停損！"
                 elif close < ma20: msg_4 = "⚠️ [支撐測試] 跌破月線，進入3%洗盤緩衝區，密切觀察。"
+                elif pullback_pass: msg_4 = "🎯 [回踩發動] 縮量回測月線有守，絕佳防守加碼點！"
                 else: msg_4 = "🛡️ [月線有守] 支撐強勁，安全續抱。"
 
                 # 標記使用者當前選擇的策略
@@ -411,7 +442,7 @@ async def 指令(ctx):
         description="老闆，請隨時對我下達以下指令（格式內的 `[ ]` 請記得空一格）：",
         color=0x2ECC71
     )
-    embed_cmd.add_field(name="🔍 `!健檢`", value="360度全方位掃描目前庫存的狀態。", inline=False)
+    embed_cmd.add_field(name="🔍 `!健檢`", value="360度全方位掃描目前庫存的狀態與攻擊訊號。", inline=False)
     embed_cmd.add_field(name="🔬 `!評估 [代號]`", value="個股 X 光機！幫你鑑定這檔股票是否符合買進策略。", inline=False)
     embed_cmd.add_field(name="📥 `!新增 [代號] [成本] [策略] [名稱] [停利%] [停損%]`", value="將股票交給小秘書監控 (名稱留空會自動抓取)。", inline=False)
     embed_cmd.add_field(name="✏️ `!成本 [代號] [新成本]`", value="修改持股的買入平均成本價。\n*範例: `!成本 2330 820`*", inline=False)
@@ -436,7 +467,7 @@ async def 評估(ctx, code: str):
 
 @bot.command()
 async def 健檢(ctx):
-    msg = await ctx.send("⏳ 正在啟動 360 度全方位庫存診斷系統...")
+    msg = await ctx.send("⏳ 正在啟動 360 度全方位庫存診斷系統 (含攻擊訊號掃描)...")
     try:
         result = await asyncio.wait_for(asyncio.to_thread(run_health_check), timeout=120.0)
         if len(result) > 1900: result = result[:1900] + "\n\n⚠️ ...(庫存過多，字數達 Discord 上限)"
@@ -461,7 +492,6 @@ async def 新增(ctx, code: str, price: float, strat_num: str, name: str = "", t
     风控文 = f" | 停利: +{tp}% 停損: -{sl}%" if (tp or sl) else " | 未設定風控"
     await ctx.send(f"✅ 已新增 **{display_title}**\n成本: `{price}`\n策略: `{full_strat}`{风控文}")
 
-# 🔥 全新功能：修改平均成本
 @bot.command()
 async def 成本(ctx, code: str, new_price: float):
     data = load_data()
@@ -574,7 +604,6 @@ async def 賣出(ctx, code: str, sell_price: float, shares: int = 1000):
     if loss_reason: embed.add_field(name="🩸 AI 戰敗檢討報告", value=loss_reason, inline=False)
     await msg.edit(content=None, embed=embed)
 
-# 🔥 全新升級：月度績效追蹤系統
 @bot.command()
 async def 績效(ctx, target_month: str = None):
     history = load_history()
@@ -586,7 +615,6 @@ async def 績效(ctx, target_month: str = None):
         
     total_all_time = history.get('total_pnl', 0)
     
-    # 依據 YYYY-MM 將交易分類
     monthly_data = {}
     for t in trades:
         month_key = t['date'][:7] 
@@ -601,14 +629,12 @@ async def 績效(ctx, target_month: str = None):
         target_month = datetime.now(timezone(timedelta(hours=8))).strftime('%Y-%m')
         
     if target_month not in monthly_data and monthly_data:
-        # 如果當月還沒交易，預設顯示最近有交易的那個月
         target_month = sorted(monthly_data.keys())[-1]
 
     embed = discord.Embed(title="🏆 雲端小秘書 - 月度績效戰報", color=0xF1C40F)
     total_str = f"+{int(total_all_time)}" if total_all_time >= 0 else f"{int(total_all_time)}"
     embed.add_field(name="🌍 歷史累積總損益 (All-Time)", value=f"**{total_str} 元**", inline=False)
     
-    # 列出最近 3 個月的統整
     recent_months = sorted(monthly_data.keys(), reverse=True)[:3]
     month_summary_str = ""
     for m in recent_months:
@@ -620,7 +646,6 @@ async def 績效(ctx, target_month: str = None):
         
     embed.add_field(name="📅 近期月份總結", value=month_summary_str, inline=False)
     
-    # 顯示特定月份的每一筆明細
     if target_month in monthly_data:
         t_data = monthly_data[target_month]
         t_pnl = t_data['pnl']
