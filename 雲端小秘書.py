@@ -157,7 +157,6 @@ def check_market_trend():
     except:
         return True
 
-# 🆕 出場與戰敗檢討：加入量能判定
 def run_loss_analysis(code, name, buy_price, sell_price, strat):
     tickers_dict = get_all_taiwan_tickers()
     exact_ticker = f"{code}.TW" if f"{code}.TW" in tickers_dict else f"{code}.TWO"
@@ -211,9 +210,6 @@ def run_loss_analysis(code, name, buy_price, sell_price, strat):
     except Exception as e:
         return f"分析失敗 ({e})"
 
-# =====================================================================
-# 📚 深度健檢 (分析模組)
-# =====================================================================
 def run_deep_analysis(code):
     tickers_dict = get_all_taiwan_tickers() 
     exact_ticker = f"{code}.TW"
@@ -341,7 +337,7 @@ def run_deep_analysis(code):
         return f"❌ 分析過程發生錯誤: `{e}`"
 
 # =====================================================================
-# 🔬 嚴格量化評估與資金管控 (進場雷達)
+# 🔬 評估模組 🆕(加入「溫和達標/試單」分級判定模型)
 # =====================================================================
 def run_evaluation(code):
     tickers_dict = get_all_taiwan_tickers() 
@@ -370,49 +366,79 @@ def run_evaluation(code):
         vol_5ma = latest['Vol_5MA'].item()
         
         ma20 = round(latest['SMA_20'].item(), 2)
+        ma60 = round(latest['SMA_60'].item(), 2)
         atr = latest['ATR_14'].item()
-        bull_aligned = latest['Bull_Aligned'].item()
         
         bb_width = prev1['BB_Width'].item()
         macd, sig = latest['MACD'].item(), latest['Signal'].item()
         rsi, prev_rsi = latest['RSI'].item(), prev1['RSI'].item()
         max20_prev = prev1['Max_20'].item()
         
-        vol_shrink_pass = vol < (vol_5ma * 0.7) 
-        vol_surge_pass = vol > (vol_5ma * 1.5)  
+        # 🆕 量能與趨勢雙軌制分級 (嚴格/溫和)
+        vol_shrink_strict = vol < (vol_5ma * 0.7)
+        vol_shrink_warn = vol < (vol_5ma * 0.95)
+        vol_surge_strict = vol > (vol_5ma * 1.5)
+        vol_surge_warn = vol > (vol_5ma * 1.2)
         
-        bb_pass = (bb_width < 0.12) and (close > latest['BB_Upper'].item()) and vol_surge_pass and bull_aligned
-        macd_pass = bull_aligned and (macd > sig) and (prev1['MACD'].item() <= prev1['Signal'].item())
-        rsi_pass = (close < ma20) and (prev_rsi < 30) and (rsi >= 30)
-        pullback_pass = bull_aligned and (low <= ma20 + (atr*0.5)) and (close >= ma20) and vol_shrink_pass
-        breakout_pass = bull_aligned and (close >= max20_prev) and vol_surge_pass
+        bull_strict = latest['Bull_Aligned'].item()
+        bull_warn = (close > ma20) and (ma20 > ma60) # 至少股價大於月線且月線大於季線
+        
+        # 策略 1
+        s1_base = (bb_width < 0.15) and (close > latest['BB_Upper'].item())
+        s1_stat = 2 if (s1_base and vol_surge_strict and bull_strict) else (1 if (s1_base and vol_surge_warn and bull_warn) else 0)
+        
+        # 策略 2
+        s2_base = (macd > sig) and (prev1['MACD'].item() <= prev1['Signal'].item())
+        s2_stat = 2 if (s2_base and bull_strict) else (1 if (s2_base and bull_warn) else 0)
+        
+        # 策略 3
+        s3_base = (close < ma20) and (rsi >= 30)
+        s3_stat = 2 if (s3_base and prev_rsi < 30) else (1 if (s3_base and prev_rsi < 35) else 0)
+        
+        # 策略 4
+        s4_base = (low <= ma20 + (atr*0.5)) and (close >= ma20 * 0.98)
+        s4_stat = 2 if (s4_base and vol_shrink_strict and bull_strict) else (1 if (s4_base and vol_shrink_warn and bull_warn) else 0)
+        
+        # 策略 5
+        s5_base = (close >= max20_prev)
+        s5_stat = 2 if (s5_base and vol_surge_strict and bull_strict) else (1 if (s5_base and vol_surge_warn and bull_warn) else 0)
 
         market_warning = ""
         if not market_uptrend:
-            bb_pass = breakout_pass = False
+            s1_stat = s5_stat = 0
             market_warning = "⚠️ **[大盤警示]** 台灣加權指數跌破月線，系統強制關閉「動能突破」策略，嚴防假突破！\n"
 
-        msg = f"🔬 **【AI 量化打擊區 X 光機】**\n"
+        def get_stat_text(stat, msg_perfect, msg_warn):
+            if stat == 2: return f"✅ **完美觸發** [{msg_perfect}]"
+            elif stat == 1: return f"🟡 **溫和達標** [{msg_warn}]"
+            else: return "❌ 未達標"
+
+        msg = f"🔬 **【AI 量化打擊區 X 光機】(彈性試單版)**\n"
         msg += f"📌 **{code} {stock_name}** | 收盤價: `{close}` | 日均波動 ATR: `{round(atr, 2)}`\n"
         msg += f"📊 5日均量基準: `{int(vol_5ma/1000):,}` 張 | 當日成交: `{int(vol/1000):,}` 張\n"
         msg += "=========================\n"
         if market_warning: msg += market_warning + "=========================\n"
         
-        msg += f"💥 **策略 1 (布林帶量突破)**: {'✅ 觸發 [大於均量1.5倍]' if bb_pass else '❌ 未達標'}\n"
-        msg += f"🏄‍♂️ **策略 2 (MACD多方發動)**: {'✅ 觸發' if macd_pass else '❌ 未達標'}\n"
-        msg += f"🎣 **策略 3 (極端超賣反彈)**: {'✅ 觸發' if rsi_pass else '❌ 未達標'}\n"
-        msg += f"🛡️ **策略 4 (多頭縮量回踩)**: {'✅ 觸發 [低於均量70%]' if pullback_pass else '❌ 未達標 (需等窒息量)'}\n"
-        msg += f"🚀 **策略 5 (帶量創波段高)**: {'✅ 觸發 [大於均量1.5倍]' if breakout_pass else '❌ 未達標'}\n"
+        msg += f"💥 **策略 1 (布林帶量突破)**: {get_stat_text(s1_stat, '量增>1.5倍/完美多頭', '量能溫和/趨勢盤堅')}\n"
+        msg += f"🏄‍♂️ **策略 2 (MACD多方發動)**: {get_stat_text(s2_stat, '完美多頭', '站穩月線')}\n"
+        msg += f"🎣 **策略 3 (極端超賣反彈)**: {get_stat_text(s3_stat, '極端超賣<30', '中度超賣<35')}\n"
+        msg += f"🛡️ **策略 4 (多頭縮量回踩)**: {get_stat_text(s4_stat, '極限窒息量<70%', '量縮<95%')}\n"
+        msg += f"🚀 **策略 5 (帶量創波段高)**: {get_stat_text(s5_stat, '量增>1.5倍/完美多頭', '量能溫和/趨勢盤堅')}\n"
         msg += "=========================\n"
         
-        matched_strats = []
-        if bb_pass: matched_strats.append("策略1")
-        if macd_pass: matched_strats.append("策略2")
-        if rsi_pass: matched_strats.append("策略3")
-        if pullback_pass: matched_strats.append("策略4")
-        if breakout_pass: matched_strats.append("策略5")
+        has_perfect = any(stat == 2 for stat in [s1_stat, s2_stat, s3_stat, s4_stat, s5_stat])
+        has_warn = any(stat == 1 for stat in [s1_stat, s2_stat, s3_stat, s4_stat, s5_stat])
         
-        if matched_strats:
+        if has_perfect or has_warn:
+            matched = []
+            if s1_stat > 0: matched.append(f"策略1({s1_stat})")
+            if s2_stat > 0: matched.append(f"策略2({s2_stat})")
+            if s3_stat > 0: matched.append(f"策略3({s3_stat})")
+            if s4_stat > 0: matched.append(f"策略4({s4_stat})")
+            if s5_stat > 0: matched.append(f"策略5({s5_stat})")
+            
+            strat_display = ", ".join([s[:3] for s in matched])
+            
             config = load_config()
             proxy_equity = config.get('total_capital', 0) + load_history().get('total_pnl', 0)
             
@@ -420,29 +446,34 @@ def run_evaluation(code):
             risk_per_share = close - stop_loss_price
             
             if proxy_equity > 0 and risk_per_share > 0:
-                max_loss_amt = int(proxy_equity * 0.02)
+                # 🆕 根據達標程度分配資金
+                risk_pct = 0.02 if has_perfect else 0.01
+                max_loss_amt = int(proxy_equity * risk_pct)
                 suggested_shares = int(max_loss_amt / risk_per_share)
                 suggested_amt = int(suggested_shares * close)
                 
                 risk_advice = (
                     f"⚖️ **機構級資金控管 (風險平價模型)**\n"
                     f"   👉 建議防守線 (1.5xATR)：破 **`{stop_loss_price}`** 元停損\n"
-                    f"   👉 帳戶 2% 風險上限：約 `{max_loss_amt:,}` 元\n"
+                    f"   👉 單筆風險上限 ({int(risk_pct*100)}%)：約 `{max_loss_amt:,}` 元\n"
                     f"   👉 換算**建議買進股數**：最多 **`{suggested_shares:,}` 股** (總投入約 `{suggested_amt:,}` 元)\n"
                 )
             else:
-                risk_advice = f"⚖️ **防守建議**：將防守線設於 `{round(close - (1.5 * atr), 2)}`，嚴守單筆不虧損總資金 2% 之紀律。\n"
+                risk_advice = f"⚖️ **防守建議**：將防守線設於 `{round(close - (1.5 * atr), 2)}`，嚴守紀律。\n"
             
-            msg += f"💡 **【AI 教練評估】: 發現交易機會！**\n🔥 該股目前符合 **{', '.join(matched_strats)}** 發動訊號。\n{risk_advice}\n進場請用 `!新增 {code} {close} [股數] {matched_strats[0][-1]}` 交給小秘書監控！"
+            if has_perfect:
+                msg += f"💡 **【AI 教練評估】: 發現高勝率機會！**\n🔥 該股符合 **{strat_display}** 完美觸發訊號，動能充沛。\n{risk_advice}\n進場請用 `!新增 {code} {close} [股數] {matched[0][-2]}` 建立監控！"
+            else:
+                msg += f"💡 **【AI 教練評估】: 具備潛力，建議小注試單。**\n🟡 該股符合 **{strat_display}** 溫和達標訊號，但動能或趨勢尚未達完美狀態。\n⚠️ **因僅為溫和達標，建議將部位減半試單。**\n{risk_advice}\n進場請用 `!新增 {code} {close} [股數] {matched[0][-2]}` 建立監控！"
         else:
-            msg += f"💡 **【AI 教練評估】: 建議觀望 👀**\n目前未觸發任何高勝率攻擊或防守條件，資金切勿在此無效率區間消耗。"
+            msg += f"💡 **【AI 教練評估】: 建議觀望 👀**\n目前未觸發任何量價攻擊或防守條件，資金切勿在此無效率區間消耗。"
             
         return msg
     except Exception as e:
         return f"❌ 評估過程發生錯誤: `{e}`"
 
 # =====================================================================
-# 🏥 庫存健康檢查模組 🆕(出場量能判定核彈級升級)
+# 🏥 庫存健康檢查模組
 # =====================================================================
 def run_health_check():
     portfolio = load_data()
@@ -513,7 +544,7 @@ def run_health_check():
             
             vol_surge_pass = vol > (vol_5ma * 1.5)
             vol_shrink_pass = vol < (vol_5ma * 0.7)
-            is_bear_candle = close < open_px # 實體黑K
+            is_bear_candle = close < open_px 
             
             bb_pass = (bb_width < 0.10) and (close > bb_upper) and vol_surge_pass and is_uptrend and (close > open_px)
             macd_pass = is_uptrend and (close > ma60) and (macd_val > sig_val) and (macd_val > prev_macd)
@@ -539,7 +570,6 @@ def run_health_check():
                 is_s3 = "3" in strat or "RSI" in strat
                 is_s4 = "4" in strat or "回踩" in strat
                 
-                # 🆕 1. 動能/創高 (融合出場量能判定)
                 msg_15 = ""
                 if close < ma20 and vol_surge_pass:
                     msg_15 = "☠️ [爆量破月線] 法人倒貨，波段防守徹底崩潰，無條件清倉！"
@@ -559,7 +589,6 @@ def run_health_check():
                 elif breakout_pass: msg_15 = "🎯 [創高發動] 帶量突破近一月新高，強勢上攻！"
                 else: msg_15 = "🚀 [強勢多頭] 延續上攻慣性，緊抱！"
 
-                # 🆕 2. 波段趨勢 (融合出場量能判定)
                 msg_2 = ""
                 if close < ma20 and vol_surge_pass:
                     msg_2 = "☠️ [爆量破月線] 趨勢防守底遭重挫大出貨，清倉！"
@@ -572,7 +601,6 @@ def run_health_check():
                 elif macd_pass: msg_2 = "🎯 [趨勢發動] MACD多頭發散，新波段攻擊！"
                 else: msg_2 = "🌊 [波段健康] 趨勢向上無虞。"
 
-                # 3. 逆勢反彈
                 msg_3 = ""
                 if close < ma20 * 0.97 and vol_surge_pass: 
                     msg_3 = "☠️ [爆量破底] 反彈徹底失敗且遭遇追殺，無懸念停損！"
@@ -583,7 +611,6 @@ def run_health_check():
                 elif rsi_pass: msg_3 = "🎯 [抄底發動] 跌破超賣區後翻揚，反彈確立！"
                 else: msg_3 = f"🎣 [RSI {round(rsi_val, 1)}] 處於反彈或震盪週期。"
 
-                # 🆕 4. 支撐防守 (融合出場量能判定)
                 msg_4 = ""
                 if close < ma20 * 0.97 and vol_surge_pass: 
                     msg_4 = "☠️ [爆量貫破] 防守區遭主力帶量倒貨擊穿，立即停損！"
@@ -623,7 +650,7 @@ def run_health_check():
         except Exception as e:
             stock_messages.append(f"❌ **{code} {info.get('name', '')}**: 運算錯誤 ({e})\n\n")
 
-    header_msg = "📊 **【雲端精準監控戰報】(V12 終極法人心法版)**\n"
+    header_msg = "📊 **【雲端精準監控戰報】(V13 彈性試單版)**\n"
     if not market_uptrend:
         header_msg += "⚠️ **[大盤警示]** 加權指數跌破月線，系統已自動關閉攻擊判定！\n"
     header_msg += "=========================\n"
@@ -653,7 +680,6 @@ intents.message_content = True
 bot = commands.Bot(command_prefix='!', intents=intents)
 bot.remove_command('help')
 
-# 💡 魔法機制：破解 Discord 無法辨識多行指令的限制
 @bot.event
 async def on_message(message):
     if message.author == bot.user:
@@ -715,7 +741,7 @@ async def 指令(ctx):
     embed_cmd.add_field(name="🏦 `!本金 [金額]`", value="設定初始帳戶總資金，解鎖法人級儀表板。", inline=False)
     embed_cmd.add_field(name="📦 `!庫存`", value="秒速清點精簡版庫存與帳面賺賠明細。", inline=False)
     embed_cmd.add_field(name="🔍 `!健檢`", value="360度全方位掃描目前庫存狀態與操盤教練對策。", inline=False)
-    embed_cmd.add_field(name="🔬 `!評估 [代號]`", value="個股攻擊雷達！套用嚴格窒息量/攻擊量濾網。", inline=False)
+    embed_cmd.add_field(name="🔬 `!評估 [代號]`", value="個股攻擊雷達！套用彈性分級試單濾網。", inline=False)
     embed_cmd.add_field(name="📑 `!分析 [代號]`", value="法人級個股深度研究報告 (含外資投信籌碼)。", inline=False)
     embed_cmd.add_field(name="📥 `!新增 [代號] [均價] [股數] [策略] [停利%] [停損%]`", value="將股票交給小秘書監控 (名稱全自動抓取)。", inline=False)
     embed_cmd.add_field(name="✏️ `!部位 [代號] [新均價] [新總股數]`", value="手動校正持股的成本價與總股數。", inline=False)
