@@ -340,7 +340,7 @@ def run_deep_analysis(code):
         return f"❌ 分析過程發生錯誤: `{e}`"
 
 # =====================================================================
-# 🔬 評估模組 (彈性分級試單版)
+# 🔬 評估模組 (自動換算停損 % 數)
 # =====================================================================
 def run_evaluation(code):
     tickers_dict = get_all_taiwan_tickers() 
@@ -443,6 +443,12 @@ def run_evaluation(code):
             stop_loss_price = round(close - (1.5 * atr), 2)
             risk_per_share = close - stop_loss_price
             
+            # 🆕 自動計算停損 % 數 (四捨五入到整數，方便設定指令)
+            stop_loss_pct = 0
+            if close > 0:
+                stop_loss_pct = round(((close - stop_loss_price) / close) * 100)
+                if stop_loss_pct <= 0: stop_loss_pct = 1 # 確保最少有 1%
+            
             if proxy_equity > 0 and risk_per_share > 0:
                 risk_pct = 0.02 if has_perfect else 0.01
                 max_loss_amt = int(proxy_equity * risk_pct)
@@ -458,10 +464,11 @@ def run_evaluation(code):
             else:
                 risk_advice = f"⚖️ **防守建議**：將防守線設於 `{round(close - (1.5 * atr), 2)}`，嚴守紀律。\n"
             
+            # 🆕 將停損 % 數自動代入最後的進場指令中
             if has_perfect:
-                msg += f"💡 **【AI 教練評估】: 發現高勝率機會！**\n🔥 該股符合 **{strat_display}** 完美觸發訊號，動能充沛。\n{risk_advice}\n進場請用 `!新增 {code} {close} [股數] {best_strat_num}` 建立監控！"
+                msg += f"💡 **【AI 教練評估】: 發現高勝率機會！**\n🔥 該股符合 **{strat_display}** 完美觸發訊號，動能充沛。\n{risk_advice}\n進場請用 `!新增 {code} {close} [股數] {best_strat_num} [停利%] {stop_loss_pct}` 建立監控！"
             else:
-                msg += f"💡 **【AI 教練評估】: 具備潛力，建議小注試單。**\n🟡 該股符合 **{strat_display}** 溫和達標訊號，但動能或趨勢尚未達完美狀態。\n⚠️ **因僅為溫和達標，建議將部位減半試單。**\n{risk_advice}\n進場請用 `!新增 {code} {close} [股數] {best_strat_num}` 建立監控！"
+                msg += f"💡 **【AI 教練評估】: 具備潛力，建議小注試單。**\n🟡 該股符合 **{strat_display}** 溫和達標訊號，但動能或趨勢尚未達完美狀態。\n⚠️ **因僅為溫和達標，建議將部位減半試單。**\n{risk_advice}\n進場請用 `!新增 {code} {close} [股數] {best_strat_num} [停利%] {stop_loss_pct}` 建立監控！"
         else:
             msg += f"💡 **【AI 教練評估】: 建議觀望 👀**\n目前未觸發任何量價攻擊或防守條件，資金切勿在此無效率區間消耗。"
             
@@ -647,7 +654,7 @@ def run_health_check():
         except Exception as e:
             stock_messages.append(f"❌ **{code} {info.get('name', '')}**: 運算錯誤 ({e})\n\n")
 
-    header_msg = "📊 **【雲端精準監控戰報】(V13 彈性試單版)**\n"
+    header_msg = "📊 **【雲端精準監控戰報】(V16 實戰極速版)**\n"
     if not market_uptrend:
         header_msg += "⚠️ **[大盤警示]** 加權指數跌破月線，系統已自動關閉攻擊判定！\n"
     header_msg += "=========================\n"
@@ -748,7 +755,6 @@ async def 指令(ctx):
     embed_cmd.add_field(name="💸 `!賣出 [代號] [賣出價] [賣出股數]`", value="結算並記錄損益。股數留空則全數賣出。", inline=False)
     embed_cmd.add_field(name="🏆 `!績效 [YYYY-MM]`", value="查看總績效與月度績效明細。", inline=False)
     
-    # 🆕 策略代號對照表 (親民白話文版)
     strat_desc = (
         "**1** ➡️ `布林帶量突破`：盤整很久後，突然爆量衝破上軌，抓準備飆升的發動點。\n"
         "**2** ➡️ `MACD趨勢波段`：長短均線多頭排列且MACD轉強，適合穩健抱波段吃魚身。\n"
