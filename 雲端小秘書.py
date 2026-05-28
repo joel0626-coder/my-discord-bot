@@ -115,20 +115,17 @@ def calculate_indicators(df):
     
     df['Max_20'] = df['Close'].rolling(window=20).max()
     
-    # 布林通道
     std = df['Close'].rolling(window=20).std()
     df['BB_Upper'] = df['SMA_20'] + (2 * std)
     df['BB_Lower'] = df['SMA_20'] - (2 * std)
     df['BB_Width'] = (df['BB_Upper'] - df['BB_Lower']) / df['SMA_20']
     
-    # MACD
     ema12 = df['Close'].ewm(span=12, adjust=False).mean()
     ema26 = df['Close'].ewm(span=26, adjust=False).mean()
     df['MACD'] = ema12 - ema26
     df['Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
     df['MACD_Hist'] = df['MACD'] - df['Signal']
     
-    # RSI
     delta = df['Close'].diff()
     gain = delta.where(delta > 0, 0)
     loss = -delta.where(delta < 0, 0)
@@ -137,7 +134,6 @@ def calculate_indicators(df):
     rs = avg_gain / avg_loss
     df['RSI'] = 100 - (100 / (1 + rs))
     
-    # ATR 真實波動幅度
     high_low = df['High'] - df['Low']
     high_close = np.abs(df['High'] - df['Close'].shift())
     low_close = np.abs(df['Low'] - df['Close'].shift())
@@ -145,7 +141,6 @@ def calculate_indicators(df):
     true_range = np.max(ranges, axis=1)
     df['ATR_14'] = true_range.rolling(14).mean()
     
-    # 多頭排列判定
     df['Bull_Aligned'] = (df['SMA_5'] > df['SMA_10']) & (df['SMA_10'] > df['SMA_20']) & (df['SMA_20'] > df['SMA_60'])
     
     return df
@@ -162,6 +157,7 @@ def check_market_trend():
     except:
         return True
 
+# 🆕 出場與戰敗檢討：加入量能判定
 def run_loss_analysis(code, name, buy_price, sell_price, strat):
     tickers_dict = get_all_taiwan_tickers()
     exact_ticker = f"{code}.TW" if f"{code}.TW" in tickers_dict else f"{code}.TWO"
@@ -178,32 +174,45 @@ def run_loss_analysis(code, name, buy_price, sell_price, strat):
         macd_val = latest['MACD'].item()
         sig_val = latest['Signal'].item()
         rsi = latest['RSI'].item()
+        vol = latest['Volume'].item()
+        vol_5ma = latest['Vol_5MA'].item()
         
+        vol_surge = vol > vol_5ma * 1.5
+        vol_shrink = vol < vol_5ma * 0.7
         market_uptrend = check_market_trend()
         reasons = []
         
         if not market_uptrend:
-            reasons.append("📉 **大盤拖累**：加權指數跌破月線，覆巢之下無完卵，此筆屬於正確防守。")
-        if sell_price < ma20:
+            reasons.append("📉 **大盤拖累**：加權指數跌破月線，覆巢之下無完卵，此筆屬於正確的紀律防守。")
+            
+        if sell_price < ma20 and vol_surge:
+            reasons.append("☠️ **爆量破底**：股價帶大散戶逃命量跌破月線，主力徹底撤退，這筆停損完全正確，避開了大坑！")
+        elif sell_price < ma20 and vol_shrink:
+            reasons.append("⚠️ **無量跌破**：雖破月線但量能極度萎縮，此筆有機會是主力惡意洗盤。但嚴守紀律停損依然是好習慣。")
+        elif sell_price < ma20:
             reasons.append("⚠️ **破底停損**：股價跌破月線(波段生命線)，技術面翻空。")
+            
         elif sell_price < ma10 and ("1" in strat or "5" in strat):
-            reasons.append("⚠️ **動能消散**：動能策略跌破 10 日線，強勢慣性改變。")
+            reasons.append("⚠️ **動能消散**：動能策略跌破 10 日線，強勢慣性改變，出場保本。")
+            
         if macd_val < sig_val:
             reasons.append("📉 **趨勢轉空**：MACD 出現死叉，買盤力道衰退。")
+            
         if rsi < 40:
             reasons.append("🧊 **人氣退潮**：RSI 轉弱，陷入無量陰跌。")
+            
         if buy_price > ma10 and sell_price < ma10 and not market_uptrend:
-            reasons.append("💡 **AI 教練碎碎念**：大盤不佳時追高強勢股容易被洗，下次請耐心等待「縮量回踩」。")
+            reasons.append("💡 **AI 教練碎碎念**：大盤不佳時追高強勢股容易被雙巴，下次請耐心等待「縮量回踩」再試單。")
             
         if not reasons:
-            reasons.append("💡 **AI 教練碎碎念**：技術面無明顯嚴重破壞。此筆可能為主力洗盤或個人資金調度。")
+            reasons.append("💡 **AI 教練碎碎念**：技術面無明顯嚴重破壞。此筆虧損可能為震盪洗盤，或老闆個人資金調度，無需過度氣餒。")
             
         return "\n".join(reasons)
     except Exception as e:
         return f"分析失敗 ({e})"
 
 # =====================================================================
-# 📚 深度健檢 (包含量能結構文字判定)
+# 📚 深度健檢 (分析模組)
 # =====================================================================
 def run_deep_analysis(code):
     tickers_dict = get_all_taiwan_tickers() 
@@ -241,19 +250,16 @@ def run_deep_analysis(code):
         sig = round(latest['Signal'].item(), 2)
         atr = latest['ATR_14'].item()
         
-        # 提取量能數據
         vol = latest['Volume'].item()
         vol_5ma = latest['Vol_5MA'].item()
         vol_lots = int(vol / 1000)
         
-        # 估值狀態判定
         val_status = ""
         if pe_ratio != 'N/A':
             if pe_ratio > 40: val_status = "屬於高估值動能股，對資金行情敏感，嚴禁向下攤平。"
             elif pe_ratio < 15: val_status = "屬於低本益比價值股，下檔具備基本面保護傘。"
             else: val_status = "估值處於合理區間。"
         
-        # 籌碼資料抓取
         foreign_net_lots, trust_net_lots = 0, 0
         chip_status = ""
         try:
@@ -289,20 +295,17 @@ def run_deep_analysis(code):
             else: chip_status = "⚠️ 無法取得近期籌碼資料或伺服器無資料。"
         except: chip_status = "⚠️ 籌碼資料伺服器連線異常或超時。"
 
-        # 趨勢判定
         bull_aligned = latest['Bull_Aligned'].item()
         if bull_aligned and close > ma60: trend_msg = f"均線呈現標準「多頭排列」，長中短天期趨勢一致向上。"
         elif close > ma20 and close > ma60: trend_msg = f"目前股價 (`{close}`) 站穩月季線，屬偏多震盪格局。"
         elif close < ma20 and close < ma60: trend_msg = f"股價跌破生命線，處於空頭弱勢格局，易跌難漲。"
         else: trend_msg = f"目前股價處於月線與季線之間，屬於震盪整理、方向未明階段。"
         
-        # 量能狀態判定
         if vol > vol_5ma * 2.0: vol_msg = f"當日 `{vol_lots:,}` 張，達 5 日均量 2 倍以上，屬「**爆量/攻擊量**」格局。"
         elif vol > vol_5ma * 1.5: vol_msg = f"當日 `{vol_lots:,}` 張，達 5 日均量 1.5 倍，屬「**攻擊推升量**」。"
         elif vol < vol_5ma * 0.7: vol_msg = f"當日 `{vol_lots:,}` 張，低於 5 日均量 70%，屬「**極度量縮/窒息量**」冷卻狀態。"
         else: vol_msg = f"當日 `{vol_lots:,}` 張，與近期均量相近，動能維持常態。"
 
-        # 防禦點位 (ATR)
         def1_low, def1_high = round(ma10 - (atr * 0.5), 1), round(ma10 + (atr * 0.5), 1)
         def2_low, def2_high = round(ma20 - (atr * 0.5), 1), round(ma20 + (atr * 0.5), 1)
 
@@ -338,7 +341,7 @@ def run_deep_analysis(code):
         return f"❌ 分析過程發生錯誤: `{e}`"
 
 # =====================================================================
-# 🔬 嚴格量化評估與資金管控 (寫入窒息量與爆量濾網)
+# 🔬 嚴格量化評估與資金管控 (進場雷達)
 # =====================================================================
 def run_evaluation(code):
     tickers_dict = get_all_taiwan_tickers() 
@@ -375,20 +378,13 @@ def run_evaluation(code):
         rsi, prev_rsi = latest['RSI'].item(), prev1['RSI'].item()
         max20_prev = prev1['Max_20'].item()
         
-        # 🆕 量能嚴格濾網 (Shrink & Surge)
-        vol_shrink_pass = vol < (vol_5ma * 0.7)  # 窒息量：低於5日均量70%
-        vol_surge_pass = vol > (vol_5ma * 1.5)   # 攻擊量：大於5日均量150%
+        vol_shrink_pass = vol < (vol_5ma * 0.7) 
+        vol_surge_pass = vol > (vol_5ma * 1.5)  
         
-        # 量化策略條件全面升級
-        # 策略1: 布林壓縮突破 (必須伴隨攻擊量)
         bb_pass = (bb_width < 0.12) and (close > latest['BB_Upper'].item()) and vol_surge_pass and bull_aligned
-        # 策略2: MACD多方發動
         macd_pass = bull_aligned and (macd > sig) and (prev1['MACD'].item() <= prev1['Signal'].item())
-        # 策略3: 乖離過大極端超賣
         rsi_pass = (close < ma20) and (prev_rsi < 30) and (rsi >= 30)
-        # 策略4: 多頭縮量回踩 (強制要求必須是窒息量)
         pullback_pass = bull_aligned and (low <= ma20 + (atr*0.5)) and (close >= ma20) and vol_shrink_pass
-        # 策略5: 帶量創波段高 (必須伴隨攻擊量)
         breakout_pass = bull_aligned and (close >= max20_prev) and vol_surge_pass
 
         market_warning = ""
@@ -420,7 +416,6 @@ def run_evaluation(code):
             config = load_config()
             proxy_equity = config.get('total_capital', 0) + load_history().get('total_pnl', 0)
             
-            # 法人級資金控管：Risk Parity (風險平價) 模型
             stop_loss_price = round(close - (1.5 * atr), 2)
             risk_per_share = close - stop_loss_price
             
@@ -447,7 +442,7 @@ def run_evaluation(code):
         return f"❌ 評估過程發生錯誤: `{e}`"
 
 # =====================================================================
-# 🏥 庫存健康檢查模組
+# 🏥 庫存健康檢查模組 🆕(出場量能判定核彈級升級)
 # =====================================================================
 def run_health_check():
     portfolio = load_data()
@@ -516,9 +511,9 @@ def run_health_check():
             max20_prev = prev['Max_20'].item()
             is_uptrend = latest['SMA_60'].item() > prev['SMA_60'].item()
             
-            # 庫存健檢也套用嚴格量能判定
             vol_surge_pass = vol > (vol_5ma * 1.5)
             vol_shrink_pass = vol < (vol_5ma * 0.7)
+            is_bear_candle = close < open_px # 實體黑K
             
             bb_pass = (bb_width < 0.10) and (close > bb_upper) and vol_surge_pass and is_uptrend and (close > open_px)
             macd_pass = is_uptrend and (close > ma60) and (macd_val > sig_val) and (macd_val > prev_macd)
@@ -544,36 +539,60 @@ def run_health_check():
                 is_s3 = "3" in strat or "RSI" in strat
                 is_s4 = "4" in strat or "回踩" in strat
                 
-                # 1. 動能/創高
+                # 🆕 1. 動能/創高 (融合出場量能判定)
                 msg_15 = ""
-                if close < ma20: msg_15 = "🚨 [破月線] 動能波段皆破壞，建議清倉。"
-                elif close < ma10: msg_15 = "⚠️ [破10日線] 短線強烈建議出場；波段減碼一半。"
-                elif close < ma5: msg_15 = "🤔 [破5日線] 短線建議獲利了結；波段視為洗盤續抱。"
+                if close < ma20 and vol_surge_pass:
+                    msg_15 = "☠️ [爆量破月線] 法人倒貨，波段防守徹底崩潰，無條件清倉！"
+                elif close < ma20:
+                    msg_15 = "🚨 [破月線] 動能波段皆破壞，建議清倉。"
+                elif close < ma10 and vol_surge_pass:
+                    msg_15 = "🩸 [爆量破10日線] 高檔主力出貨，短線多單快逃！"
+                elif close < ma10:
+                    msg_15 = "⚠️ [破10日線] 跌破動能線，波段減碼一半。"
+                elif close < ma5 and vol_surge_pass and is_bear_candle:
+                    msg_15 = "⚠️ [高檔爆量黑K] 漲多爆量不漲/收黑，主力疑獲利了結，建議減碼！"
+                elif close < ma5 and vol_shrink_pass:
+                    msg_15 = "🤔 [量縮破5日] 跌破短線，但極度量縮，可視為主力洗盤續抱。"
+                elif close < ma5:
+                    msg_15 = "🤔 [破5日線] 短線強勢慣性改變，建議部分獲利了結。"
                 elif bb_pass: msg_15 = "🎯 [突破發動] 帶量突破上軌，動能攻擊中！"
                 elif breakout_pass: msg_15 = "🎯 [創高發動] 帶量突破近一月新高，強勢上攻！"
-                elif "1" in strat and bb_upper and close < bb_upper and prev['Close'].item() > prev['BB_Upper'].item():
-                    msg_15 = "💡 [回落通道] 漲多休息，進入高檔震盪。"
                 else: msg_15 = "🚀 [強勢多頭] 延續上攻慣性，緊抱！"
 
-                # 2. 波段趨勢
+                # 🆕 2. 波段趨勢 (融合出場量能判定)
                 msg_2 = ""
-                if close < ma20: msg_2 = "🚨 [破月線] 趨勢防守底遭貫破，清倉！"
-                elif macd_val < sig_val: msg_2 = "⚠️ [MACD死叉] 短線出場；波段考慮減碼。"
-                elif hist_val < prev_hist < df.iloc[-3]['MACD_Hist'].item(): msg_2 = "🤔 [紅柱連縮] 短線準備落跑；波段續抱。"
+                if close < ma20 and vol_surge_pass:
+                    msg_2 = "☠️ [爆量破月線] 趨勢防守底遭重挫大出貨，清倉！"
+                elif close < ma20: 
+                    msg_2 = "🚨 [破月線] 跌破波段生命線，建議出場。"
+                elif macd_val < sig_val: 
+                    msg_2 = "⚠️ [MACD死叉] 短線出場；波段考慮減碼。"
+                elif hist_val < prev_hist < df.iloc[-3]['MACD_Hist'].item(): 
+                    msg_2 = "🤔 [紅柱連縮] 攻擊動能衰退，短線準備落跑。"
                 elif macd_pass: msg_2 = "🎯 [趨勢發動] MACD多頭發散，新波段攻擊！"
                 else: msg_2 = "🌊 [波段健康] 趨勢向上無虞。"
 
                 # 3. 逆勢反彈
                 msg_3 = ""
-                if close < ma20 * 0.97: msg_3 = "🚨 [破底] 跌破月線3%，反彈徹底失敗，停損！"
-                elif rsi_val < prev_rsi and prev_rsi > 70: msg_3 = "💰 [高檔反轉] 短線停利；波段分批減碼。"
+                if close < ma20 * 0.97 and vol_surge_pass: 
+                    msg_3 = "☠️ [爆量破底] 反彈徹底失敗且遭遇追殺，無懸念停損！"
+                elif close < ma20 * 0.97: 
+                    msg_3 = "🚨 [破底] 跌破月線3%，反彈失敗，停損。"
+                elif rsi_val < prev_rsi and prev_rsi > 70: 
+                    msg_3 = "💰 [高檔反轉] 短線停利；波段分批減碼。"
                 elif rsi_pass: msg_3 = "🎯 [抄底發動] 跌破超賣區後翻揚，反彈確立！"
                 else: msg_3 = f"🎣 [RSI {round(rsi_val, 1)}] 處於反彈或震盪週期。"
 
-                # 4. 支撐防守
+                # 🆕 4. 支撐防守 (融合出場量能判定)
                 msg_4 = ""
-                if close < ma20 * 0.97: msg_4 = "🚨 [防守貫破] 跌穿3%主力洗盤區，毫無懸念停損！"
-                elif close < ma20: msg_4 = "⚠️ [支撐測試] 跌破月線，進入3%洗盤區，密切觀察。"
+                if close < ma20 * 0.97 and vol_surge_pass: 
+                    msg_4 = "☠️ [爆量貫破] 防守區遭主力帶量倒貨擊穿，立即停損！"
+                elif close < ma20 * 0.97: 
+                    msg_4 = "🚨 [防守貫破] 跌穿3%主力洗盤區，停損出場。"
+                elif close < ma20 and vol_shrink_pass: 
+                    msg_4 = "🛡️ [量縮破月線] 進入洗盤區但極度量縮，防守有效，可多看一天。"
+                elif close < ma20: 
+                    msg_4 = "⚠️ [支撐測試] 跌破月線，進入3%洗盤區，密切觀察。"
                 elif pullback_pass: msg_4 = "🎯 [回踩發動] 縮量回測月線有守，防守加碼點！"
                 else: msg_4 = "🛡️ [月線有守] 支撐強勁，安全續抱。"
 
@@ -604,7 +623,7 @@ def run_health_check():
         except Exception as e:
             stock_messages.append(f"❌ **{code} {info.get('name', '')}**: 運算錯誤 ({e})\n\n")
 
-    header_msg = "📊 **【雲端精準監控戰報】(V11 終極量化升級版)**\n"
+    header_msg = "📊 **【雲端精準監控戰報】(V12 終極法人心法版)**\n"
     if not market_uptrend:
         header_msg += "⚠️ **[大盤警示]** 加權指數跌破月線，系統已自動關閉攻擊判定！\n"
     header_msg += "=========================\n"
@@ -645,7 +664,6 @@ async def on_message(message):
         for line in lines:
             line = line.strip()
             if line.startswith(bot.command_prefix):
-                # 複製一個假的訊息物件騙過系統，逐行執行
                 msg_copy = copy.copy(message)
                 msg_copy.content = line
                 await bot.process_commands(msg_copy)
@@ -742,7 +760,6 @@ async def 庫存(ctx):
             elif f"{code}.TWO" in tickers_dict: exact_ticker = f"{code}.TWO"
             
             try:
-                # 只抓最近 5 天資料求快
                 df = yf.download(exact_ticker, period="5d", progress=False)
                 if df.empty:
                     close = info.get('buy_price', 0)
