@@ -192,15 +192,25 @@ async def line_webhook(request):
                 text = event['message']['text'].strip()
                 reply_token = event.get('replyToken')
                 
-                if text.startswith('!'):
-                    responses = await process_line_command(text)
-                    if responses:
-                        final_chunks = []
-                        for resp in responses:
-                            if not resp: continue
-                            for i in range(0, len(resp), 4000):
-                                final_chunks.append(resp[i:i+4000])
-                        await asyncio.to_thread(reply_line_message, reply_token, final_chunks)
+                # 💡 支援 LINE 多行指令解析
+                all_responses = []
+                for line in text.split('\n'):
+                    line = line.strip()
+                    if line.startswith('!'):
+                        responses = await process_line_command(line)
+                        if responses:
+                            all_responses.extend(responses)
+                            
+                # 統一把所有多行指令的執行結果回傳
+                if all_responses:
+                    final_chunks = []
+                    for resp in all_responses:
+                        if not resp: continue
+                        # 確保每段訊息不超過 LINE 的 4000 字元上限
+                        for i in range(0, len(resp), 4000):
+                            final_chunks.append(resp[i:i+4000])
+                            
+                    await asyncio.to_thread(reply_line_message, reply_token, final_chunks)
     except Exception as e:
         print(f"Webhook error: {e}")
         
@@ -838,13 +848,20 @@ async def on_message(message):
     else:
         await bot.process_commands(message)
 
-@tasks.loop(minutes=30)
+@tasks.loop(minutes=1)
 async def auto_report():
     tw_tz = timezone(timedelta(hours=8))
     now = datetime.now(tw_tz)
+    
+    # 週末不推播
     if now.weekday() > 4: return 
+    
+    # 只在整點 (00分) 或半點 (30分) 準時觸發
+    if now.minute not in [0, 30]: return
+    
     current_time = now.time()
     
+    # 確認在台股盤中時間
     if time(hour=9, minute=30) <= current_time <= time(hour=14, minute=0):
         result = await asyncio.to_thread(run_health_check)
         full_msg = f"🔔 **【盤中即時監控】{now.strftime('%H:%M')} 戰報**\n{result}"
