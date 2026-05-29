@@ -11,6 +11,9 @@ from datetime import datetime, time, timezone, timedelta
 import requests
 import logging
 import copy
+import hmac
+import hashlib
+import base64
 
 # 強制關閉 yfinance 煩人的紅字報錯
 logging.getLogger('yfinance').setLevel(logging.CRITICAL)
@@ -21,9 +24,11 @@ logging.getLogger('yfinance').setLevel(logging.CRITICAL)
 TOKEN = os.environ.get('DISCORD_TOKEN')
 FINMIND_TOKEN = os.environ.get('FINMIND_TOKEN', "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJ1c2VyX2lkIjoiam9lbDA2MjYiLCJlbWFpbCI6ImpvZWwwNjI2QG1zbi5jb20iLCJ0b2tlbl92ZXJzaW9uIjowfQ.j1KeK6JfXNUX2WlEKYmdMctQV_9_xfwpzVlANplYafs")
 
-# 📱 新增：LINE 推播金鑰設定
+# 📱 LINE 雙棲系統金鑰
 LINE_CHANNEL_TOKEN = "/Gpijj0GFMEc4+HVftK5h6CY24k4ouG2YFRa4JUzCW+R3b/A9gcNQwbXTISw99Q5Ts19fsOG4iYqi2d0w1a7mjfyp4iK0e5CMOAr33BV22XIM9bxD09zr8UchDBIL0ToX94DhZNh00uIwp1+4SV81gdB04t89/1O/w1cDnyilFU="
 LINE_USER_ID = "Uc63b8db70b36f7186237abd9c4c6b8df"
+# 若有 Channel Secret 可填入此處以啟用高強度安全驗證
+LINE_CHANNEL_SECRET = os.environ.get('LINE_CHANNEL_SECRET', "")
 
 PORTFOLIO_FILE = "my_portfolio.json"
 TRADE_HISTORY_FILE = "trade_history.json"
@@ -73,31 +78,133 @@ def save_history(data):
         json.dump(data, f, indent=4, ensure_ascii=False)
 
 # =====================================================================
-# 📱 LINE 推播引擎
+# 📱 LINE 推播與雙向接收引擎
 # =====================================================================
 def send_line_message(chunks):
-    """ 負責將切好的訊息片段推送至 LINE """
-    if not LINE_CHANNEL_TOKEN or not LINE_USER_ID:
-        return
-        
+    if not LINE_CHANNEL_TOKEN or not LINE_USER_ID: return
     url = 'https://api.line.me/v2/bot/message/push'
-    headers = {
-        'Content-Type': 'application/json',
-        'Authorization': f'Bearer {LINE_CHANNEL_TOKEN}'
-    }
-    
-    # LINE API 限制每次發送最多只能包含 5 個對話泡泡 (messages)
+    headers = {'Content-Type': 'application/json', 'Authorization': f'Bearer {LINE_CHANNEL_TOKEN}'}
     for i in range(0, len(chunks), 5):
         batch = chunks[i:i+5]
         messages = [{'type': 'text', 'text': text} for text in batch]
-        data = {
-            'to': LINE_USER_ID,
-            'messages': messages
-        }
-        try:
-            requests.post(url, headers=headers, json=data)
-        except Exception as e:
-            print(f"LINE 推播失敗: {e}")
+        requests.post(url, headers=headers, json={'to': LINE_USER_ID, 'messages': messages})
+
+def reply_line_message(reply_token, chunks):
+    if not LINE_CHANNEL_TOKEN: return
+    url = 'https://api.line.me/v2/bot/message/reply'
+    headers = {'Content-Type': 'application/json', 'Authorization': f'Bearer {LINE_CHANNEL_TOKEN}'}
+    first_batch = chunks[:5]
+    try:
+        requests.post(url, headers=headers, json={'replyToken': reply_token, 'messages': [{'type': 'text', 'text': text} for text in first_batch]})
+    except Exception as e:
+        print(f"LINE 回覆失敗: {e}")
+    remaining = chunks[5:]
+    if remaining: send_line_message(remaining)
+
+# --- 虛擬 Discord 模擬器 (讓 LINE 也能共用 Discord 指令邏輯) ---
+def format_discord_content(content, embed):
+    text = str(content) if content and content != "None" else ""
+    if embed:
+        if embed.title: text += f"\n【{embed.title}】\n"
+        if embed.description: text += f"{embed.description}\n"
+        for field in embed.fields:
+            text += f"▪️ {field.name}\n{field.value}\n"
+        if embed.footer and embed.footer.text:
+            text += f"\n{embed.footer.text}"
+    # 清洗掉 Markdown 語法以符合 LINE 的顯示
+    for char in ['**', '`', '*', '_']: text = text.replace(char, '')
+    return text.strip()
+
+class FakeMsg:
+    def __init__(self, index, ctx):
+        self.index = index
+        self.ctx = ctx
+    async def edit(self, content=None, embed=None):
+        self.ctx.responses[self.index] = format_discord_content(content, embed)
+
+class FakeCtx:
+    def __init__(self): self.responses = []
+    async def send(self, content=None, embed=None):
+        self.responses.append(format_discord_content(content, embed))
+        return FakeMsg(len(self.responses) - 1, self)
+
+async def process_line_command(text):
+    args = text.split()
+    if not args: return []
+    cmd_name = args[0][1:] # 移除 '!'
+    
+    cmd = bot.get_command(cmd_name)
+    if not cmd:
+        if cmd_name in ['help', '幫助']: cmd = bot.get_command('指令')
+        else: return ["⚠️ 未知指令，請輸入 !指令 查看說明。"]
+        
+    fake_ctx = FakeCtx()
+    try:
+        if cmd_name in ['健檢', '庫存', '指令', '測試LINE']:
+            await cmd.callback(fake_ctx)
+        elif cmd_name in ['評估', '分析', '刪除']:
+            if len(args) < 2: return ["⚠️ 參數不足。"]
+            await cmd.callback(fake_ctx, args[1])
+        elif cmd_name in ['命名', '策略']:
+            if len(args) < 3: return ["⚠️ 參數不足。"]
+            await cmd.callback(fake_ctx, args[1], args[2])
+        elif cmd_name == '本金':
+            if len(args) < 2: return ["⚠️ 參數不足。"]
+            await cmd.callback(fake_ctx, float(args[1]))
+        elif cmd_name == '績效':
+            month = args[1] if len(args) > 1 else None
+            await cmd.callback(fake_ctx, month)
+        elif cmd_name in ['部位', '風控']:
+            if len(args) < 4: return ["⚠️ 參數不足。"]
+            await cmd.callback(fake_ctx, args[1], float(args[2]), float(args[3]) if cmd_name == '風控' else int(args[3]))
+        elif cmd_name == '賣出':
+            if len(args) < 3: return ["⚠️ 參數不足。"]
+            sell_shares = int(args[3]) if len(args) > 3 else None
+            await cmd.callback(fake_ctx, args[1], float(args[2]), sell_shares)
+        elif cmd_name == '新增':
+            if len(args) < 5: return ["⚠️ 參數不足。"]
+            tp = float(args[5]) if len(args) > 5 else None
+            sl = float(args[6]) if len(args) > 6 else None
+            await cmd.callback(fake_ctx, args[1], float(args[2]), int(args[3]), args[4], tp, sl)
+        else:
+            return ["⚠️ 尚不支援此指令的 LINE 操作。"]
+    except Exception as e:
+        return [f"❌ 參數格式錯誤或執行失敗: {e}"]
+        
+    return fake_ctx.responses
+
+async def line_webhook(request):
+    body = await request.text()
+    signature = request.headers.get('X-Line-Signature', '')
+    
+    if LINE_CHANNEL_SECRET:
+        hash_val = hmac.new(LINE_CHANNEL_SECRET.encode('utf-8'), body.encode('utf-8'), hashlib.sha256).digest()
+        if signature != base64.b64encode(hash_val).decode('utf-8'):
+            return web.Response(status=403, text="Invalid signature")
+
+    try:
+        data = json.loads(body)
+        for event in data.get('events', []):
+            if event.get('type') == 'message' and event.get('message', {}).get('type') == 'text':
+                user_id = event.get('source', {}).get('userId', '')
+                if user_id != LINE_USER_ID: continue
+                    
+                text = event['message']['text'].strip()
+                reply_token = event.get('replyToken')
+                
+                if text.startswith('!'):
+                    responses = await process_line_command(text)
+                    if responses:
+                        final_chunks = []
+                        for resp in responses:
+                            if not resp: continue
+                            for i in range(0, len(resp), 4000):
+                                final_chunks.append(resp[i:i+4000])
+                        await asyncio.to_thread(reply_line_message, reply_token, final_chunks)
+    except Exception as e:
+        print(f"Webhook error: {e}")
+        
+    return web.Response(status=200, text="OK")
 
 # =====================================================================
 # 📚 FinMind 股票代號快取
@@ -474,11 +581,10 @@ def run_evaluation(code):
             stop_loss_price = round(close - (1.5 * atr), 2)
             risk_per_share = close - stop_loss_price
             
-            # 🆕 自動計算停損 % 數 (四捨五入到整數，方便設定指令)
             stop_loss_pct = 0
             if close > 0:
                 stop_loss_pct = round(((close - stop_loss_price) / close) * 100)
-                if stop_loss_pct <= 0: stop_loss_pct = 1 # 確保最少有 1%
+                if stop_loss_pct <= 0: stop_loss_pct = 1 
             
             if proxy_equity > 0 and risk_per_share > 0:
                 risk_pct = 0.02 if has_perfect else 0.01
@@ -495,7 +601,6 @@ def run_evaluation(code):
             else:
                 risk_advice = f"⚖️ **防守建議**：將防守線設於 `{round(close - (1.5 * atr), 2)}`，嚴守紀律。\n"
             
-            # 🆕 將停損 % 數自動代入最後的進場指令中
             if has_perfect:
                 msg += f"💡 **【AI 教練評估】: 發現高勝率機會！**\n🔥 該股符合 **{strat_display}** 完美觸發訊號，動能充沛。\n{risk_advice}\n進場請用 `!新增 {code} {close} [股數] {best_strat_num} [停利%] {stop_loss_pct}` 建立監控！"
             else:
@@ -687,7 +792,7 @@ def run_health_check():
         except Exception as e:
             stock_messages.append(f"❌ **{code} {info.get('name', '')}**: 運算錯誤 ({e})\n\n")
 
-    header_msg = "📊 **【雲端精準監控戰報】(V16 實戰極速版)**\n"
+    header_msg = "📊 **【雲端精準監控戰報】(V17 雙向操控終極版)**\n"
     if not market_uptrend:
         header_msg += "⚠️ **[大盤警示]** 加權指數跌破月線，系統已自動關閉攻擊判定！\n"
     header_msg += "=========================\n"
@@ -761,7 +866,7 @@ async def auto_report():
             for chunk in chunks:
                 await channel.send(chunk)
                 
-        # 2. 執行 LINE 雙棲推播 (新增部分)
+        # 2. 執行 LINE 雙棲推播
         await asyncio.to_thread(send_line_message, chunks)
 
 @bot.event
@@ -791,6 +896,7 @@ async def 指令(ctx):
     embed_cmd.add_field(name="🗑️ `!刪除 [代號]`", value="將股票從監控清單中移除。", inline=False)
     embed_cmd.add_field(name="💸 `!賣出 [代號] [賣出價] [賣出股數]`", value="結算並記錄損益。股數留空則全數賣出。", inline=False)
     embed_cmd.add_field(name="🏆 `!績效 [YYYY-MM]`", value="查看總績效與月度績效明細。", inline=False)
+    embed_cmd.add_field(name="📲 `!測試LINE`", value="強制手動發送測試推播到 LINE 群組。", inline=False)
     
     strat_desc = (
         "**1** ➡️ `布林帶量突破`：盤整很久後，突然爆量衝破上軌，抓準備飆升的發動點。\n"
@@ -802,6 +908,32 @@ async def 指令(ctx):
     embed_cmd.add_field(name="📋 【策略代號對照表 & 白話文說明】 (新增/修改策略時使用)", value=strat_desc, inline=False)
     
     await ctx.send(embed=embed_cmd)
+
+@bot.command()
+async def 測試LINE(ctx):
+    msg = await ctx.send("⏳ 正在嘗試連線 LINE 伺服器並發送測試訊息...")
+    try:
+        test_msg = ["👋 老闆好！這是一條來自 Discord 伺服器的雙向測試訊息。\n如果您看到這行字，代表您的 LINE 雙棲推播系統已經【完美連線】啦！🎉"]
+        await asyncio.to_thread(send_line_message, test_msg)
+        
+        result = await asyncio.to_thread(run_health_check)
+        full_msg = f"🔔 **【強制手動推播測試】**\n{result}"
+        
+        chunks = []
+        current_chunk = ""
+        for line in full_msg.split('\n'):
+            if len(current_chunk) + len(line) + 1 > 1900:
+                chunks.append(current_chunk)
+                current_chunk = line + "\n"
+            else:
+                current_chunk += line + "\n"
+        if current_chunk:
+            chunks.append(current_chunk)
+            
+        await asyncio.to_thread(send_line_message, chunks)
+        await msg.edit(content="✅ **測試完畢！** 已經將測試訊號發送出去了，老闆快去檢查您的 LINE 有沒有「叮咚」！")
+    except Exception as e:
+        await msg.edit(content=f"❌ **發送失敗！** 系統回報錯誤: `{str(e)}`")
 
 @bot.command()
 async def 本金(ctx, amount: float):
@@ -883,36 +1015,6 @@ async def 庫存(ctx):
         
     except Exception as e:
         await msg.edit(content=f"❌ 查詢過程發生系統錯誤: `{str(e)}`")
-
-@bot.command()
-async def 測試LINE(ctx):
-    msg = await ctx.send("⏳ 正在嘗試連線 LINE 伺服器並發送測試訊息...")
-    try:
-        # 1. 先發送簡單的連線確認
-        test_msg = ["👋 老闆好！這是一條測試訊息。\n如果您看到這行字，代表您的 LINE 雙棲推播系統已經【完美連線】啦！🎉"]
-        await asyncio.to_thread(send_line_message, test_msg)
-        
-        # 2. 順便把現在的庫存戰報推過去給你看看排版
-        result = await asyncio.to_thread(run_health_check)
-        full_msg = f"🔔 **【強制手動推播測試】**\n{result}"
-        
-        chunks = []
-        current_chunk = ""
-        for line in full_msg.split('\n'):
-            if len(current_chunk) + len(line) + 1 > 1900:
-                chunks.append(current_chunk)
-                current_chunk = line + "\n"
-            else:
-                current_chunk += line + "\n"
-        if current_chunk:
-            chunks.append(current_chunk)
-            
-        await asyncio.to_thread(send_line_message, chunks)
-        
-        await msg.edit(content="✅ **測試完畢！** 已經將測試訊號發送出去了，老闆快去檢查您的 LINE 有沒有「叮咚」！")
-        
-    except Exception as e:
-        await msg.edit(content=f"❌ **發送失敗！** 系統回報錯誤: `{str(e)}`")
 
 @bot.command()
 async def 分析(ctx, code: str):
@@ -1214,10 +1316,12 @@ async def 績效(ctx, target_month: str = None):
 
 async def start_web_server():
     app = web.Application()
+    app.router.add_post('/webhook', line_webhook)
     app.router.add_get('/', lambda r: web.Response(text="Cloud Secretary Guardian is running!"))
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', int(os.environ.get('PORT', 8080)))
+    port = int(os.environ.get('PORT', 8080))
+    site = web.TCPSite(runner, '0.0.0.0', port)
     await site.start()
 
 async def main():
